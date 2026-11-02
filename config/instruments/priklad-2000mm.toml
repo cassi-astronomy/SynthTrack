@@ -1,0 +1,29 @@
+# Příklad profilu – zkopírujte do <datový adresář>/instruments/ nebo vytvořte v GUI.
+id = "c14-asi6200"
+name = "C14 2000 mm + ASI6200MM"
+focal_length_mm = 2000.0
+pixel_size_um = 3.76
+binning = 1
+software_binning = 2          # převzorkovaná data -> 2x rychlejší hledání bez ztráty
+saturation_adu = 60000.0
+gain_e_adu = 0.25
+read_noise_e = 1.5
+masters_dir = "D:/Astro/Masters/C14-ASI6200"
+dark_exptime_tolerance_s = 0.5
+dark_temp_tolerance_c = 2.0
+allow_dark_scaling = false
+require_flat = true
+date_obs_reference = "start"
+time_offset_s = 0.0
+observatory_code = "XXX"       # tříznakový kód MPC pro toto stanoviště
+observer_lat_deg = 49.2
+observer_lon_deg = 16.6
+observer_alt_m = 320.0
+site_from_header = true
+
+[match]                       # automatický režim: podle hlavičky
+INSTRUME = "ASI6200"
+FOCALLEN = 2000
+
+[filter_aliases]
+Lum = "L"

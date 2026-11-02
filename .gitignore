@@ -1,0 +1,33 @@
+# Python
+__pycache__/
+*.py[cod]
+*.pyd
+*.so
+*.egg-info/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+
+# Virtual environments and builds
+.venv/
+venv/
+build/
+dist/
+
+# Editors and operating systems
+.idea/
+.vscode/
+.DS_Store
+Thumbs.db
+
+# Local SynthTrack data and generated artefacts
+SynthTrackData/
+jobs/
+catalogs/
+models/
+_preview/
+*.log
+*.tgz
+pre_*_backup_*/

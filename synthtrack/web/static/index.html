@@ -1,0 +1,39 @@
+<!doctype html>
+<html lang="cs">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>SynthTrack</title>
+<link rel="stylesheet" href="/static/style.css">
+</head>
+<body>
+<header class="topbar">
+  <div class="brand"><span class="dot"></span>SynthTrack <span class="ver" id="ver"></span></div>
+  <div class="chips" id="chips"></div>
+</header>
+<div class="layout">
+  <aside class="sidebar">
+    <button class="btn primary wide" data-view="new">+ Nová úloha</button>
+    <button class="btn wide" data-view="watch">Automatický režim</button>
+    <button class="btn wide" id="del-finished">Smazat hotové úlohy</button>
+    <div class="side-links">
+      <a href="#" data-view="instruments">Přístroje</a>
+      <a href="#" data-view="data">Katalogy a nastavení</a>
+    </div>
+    <div class="joblist" id="joblist"></div>
+  </aside>
+  <main id="main"></main>
+</div>
+
+<div class="modal hidden" id="browser">
+  <div class="modal-box">
+    <div class="modal-head"><b>Vybrat adresář</b><button class="btn small" id="br-close">✕</button></div>
+    <div class="br-path"><input id="br-path" spellcheck="false"><button class="btn small" id="br-go">Přejít</button></div>
+    <div class="br-list" id="br-list"></div>
+    <div class="modal-foot"><span id="br-info"></span><button class="btn primary" id="br-ok">Vybrat tento adresář</button></div>
+  </div>
+</div>
+<div class="toast hidden" id="toast"></div>
+<script src="/static/app.js"></script>
+</body>
+</html>

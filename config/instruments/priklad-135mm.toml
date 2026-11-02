@@ -1,0 +1,26 @@
+# Příklad profilu – širokoúhlý objektiv
+id = "samyang135-asi2600"
+name = "Samyang 135 mm + ASI2600MM"
+focal_length_mm = 135.0
+pixel_size_um = 3.76
+binning = 1
+software_binning = 1          # podvzorkovaná data – nebinovat
+saturation_adu = 60000.0
+gain_e_adu = 0.8
+read_noise_e = 1.5
+masters_dir = "D:/Astro/Masters/135mm-ASI2600"
+dark_exptime_tolerance_s = 0.5
+dark_temp_tolerance_c = 2.0
+allow_dark_scaling = false
+require_flat = true
+date_obs_reference = "start"
+# Stanoviště patří ke konkrétnímu profilu přístroje.
+observatory_code = "XXX"       # tříznakový kód MPC
+observer_lat_deg = 49.2
+observer_lon_deg = 16.6
+observer_alt_m = 320.0
+site_from_header = true         # souřadnice z FITS mají přednost; MPC kód zůstává z profilu
+
+[match]
+INSTRUME = "ASI2600"
+FOCALLEN = 135

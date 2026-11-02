@@ -1,0 +1,25 @@
+# Profil otestovaný na reálných datech: CTA-S1 FRAM WF0, objektiv 135 mm + Moravian G4-16000 (KAF-16803)
+id = "cta-wf0"
+name = "CTA-S1 FRAM WF0: 135 mm + G4-16000"
+focal_length_mm = 135.0
+pixel_size_um = 9.0
+binning = 1
+software_binning = 1          # 14″/px je podvzorkované – nebinovat
+saturation_adu = 60000.0
+gain_e_adu = 1.6
+read_noise_e = 9.0
+masters_dir = "C:/Users/Martin/Documents/ChatGPT/SyntheticAstronomy/CTA/kalibrace"
+crop = "auto"                 # DATASEC z hlavičky
+site_from_header = true       # LATITUDE / LONGITUD / ALTITUDE (RTS2)
+observatory_code = "XXX"     # doplňte tříznakový kód MPC tohoto stanoviště
+# Záložní souřadnice pro snímky bez údajů o stanovišti v hlavičce:
+observer_lat_deg = -24.633712
+observer_lon_deg = -70.377001
+observer_alt_m = 2345.0
+registration = "stars"
+registration_order = 3
+dark_exptime_tolerance_s = 0.5
+dark_temp_tolerance_c = 2.0
+allow_dark_scaling = false
+require_flat = true
+date_obs_reference = "start"
