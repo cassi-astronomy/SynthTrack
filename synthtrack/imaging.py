@@ -29,6 +29,42 @@ def _nanmedian(a: np.ndarray, axis=0) -> np.ndarray:
         return np.nanmedian(a, axis=axis)
 
 
+def fill_nan_display(a: np.ndarray, iterations: int = 12) -> np.ndarray:
+    """Copy of ``a`` (2-D or a stack of 2-D) with NaNs filled for display only.
+
+    Every masked pixel takes the median of its finite 3×3 neighbours, growing
+    inwards from the edge of a masked region. A saturated star core is ringed
+    by bright pixels and stays bright (no "holes" in stars); a masked bad
+    column or a cosmic-ray patch in the sky gets the local background. The
+    data used for measurements are never touched."""
+    a = np.array(a, dtype=np.float32, copy=True)
+    if a.ndim == 3:
+        for i in range(a.shape[0]):
+            a[i] = fill_nan_display(a[i], iterations)
+        return a
+    bad = ~np.isfinite(a)
+    if not bad.any():
+        return a
+    if bad.all():
+        return np.zeros_like(a)
+    for _ in range(iterations):
+        if not bad.any():
+            break
+        p = np.pad(a, 1, constant_values=np.nan)
+        h, w = a.shape
+        nb = np.stack([p[1 + dy:1 + dy + h, 1 + dx:1 + dx + w]
+                       for dy in (-1, 0, 1) for dx in (-1, 0, 1) if dy or dx])
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore", RuntimeWarning)
+            m = np.nanmedian(nb, axis=0)
+        upd = bad & np.isfinite(m)
+        a[upd] = m[upd]
+        bad &= ~upd
+    if bad.any():
+        a[bad] = float(np.median(a[~bad]))
+    return a
+
+
 def track_crops(cube: np.ndarray, dts: np.ndarray, x: float, y: float, vx: float, vy: float,
                 size: int) -> np.ndarray:
     """(N, size, size) crops following the motion (zero padded at edges)."""
@@ -118,11 +154,8 @@ def to_u8(img: np.ndarray, lo: float | None = None, hi: float | None = None, sca
     """8-bit image; ``gamma`` 2 = square-root stretch (stacks), 1 = linear (animation)."""
     if lo is None or hi is None:
         lo, hi = _stretch(img)
-    finite = img[np.isfinite(img)]
-    fill = float(np.median(finite)) if finite.size else 0.0
-    # Missing coverage is not signal.  Showing NaNs as saturated white made
-    # masks look like real square sources in the animation.
-    a = np.clip((np.nan_to_num(img, nan=fill) - lo) / max(hi - lo, 1e-6), 0, 1)
+    # masked pixels: saturated star cores stay bright, masked sky stays sky
+    a = np.clip((fill_nan_display(img) - lo) / max(hi - lo, 1e-6), 0, 1)
     if gamma != 1.0:
         a = a ** (1.0 / gamma)
     im = Image.fromarray((a * 255).astype(np.uint8), mode="L")
@@ -131,17 +164,30 @@ def to_u8(img: np.ndarray, lo: float | None = None, hi: float | None = None, sca
     return im
 
 
-def local_star_shifts(crops: np.ndarray, max_shift: float = 3.0, min_peak: float = 0.3) -> list:
+def local_star_shifts(crops: np.ndarray, max_shift: float = 3.0, min_peak: float = 0.3,
+                      exclude: list | None = None, exclude_r: float = 6.0) -> list:
     """Residual shift (dx, dy) of the stars in every crop relative to the median crop.
 
     Registration is a global polynomial; locally (field corners, a partly
     blocked pupil, a poorly constrained frame) the stars of one frame can be
     off by 1–2 px, which makes the animation jump. Cross-correlation of the
     star field (high-passed, clipped) with sub-pixel parabolic peak; frames
-    where the correlation is weak or the shift implausible get (0, 0)."""
+    where the correlation is weak or the shift implausible get (0, 0).
+
+    ``exclude``: (x, y) crop positions of the object in every frame; a disk of
+    ``exclude_r`` px around the whole track is left out. Without it a bright
+    mover dominates the correlation and the "star" shifts follow the object:
+    (7) Iris, 11.4 mag, 29P field – the animation froze the asteroid and the
+    cross marking the (correct) prediction seemed to run ahead."""
     n, h, w = crops.shape
     c = np.nan_to_num(crops.astype(np.float32))
     c = np.clip(c, -3.0, 50.0)
+    if exclude:
+        yy, xx = np.mgrid[:h, :w]
+        m = np.zeros((h, w), bool)
+        for ex, ey in exclude:
+            m |= (xx - ex) ** 2 + (yy - ey) ** 2 <= exclude_r ** 2
+        c[:, m] = 0.0
     ref = np.median(c, axis=0)
     def prep(a):
         a = a - np.median(a)
@@ -187,15 +233,21 @@ def write_motion_frames(out_dir: Path, tag: str, cube: np.ndarray, dts: np.ndarr
     half = size // 2
     ox, oy = round(cx) - half, round(cy) - half
     track = [[round(x + vx * float(t) - ox, 2), round(y + vy * float(t) - oy, 2)] for t in dts]
-    # Registered data are in sigma units, therefore zero is the neutral
-    # background value for pixels without coverage.
-    q = np.clip(np.rint(ENC_C + ENC_B * np.arcsinh(np.nan_to_num(crops, nan=0.0) / ENC_A)), 0, 255).astype(np.uint8)
+    # masked pixels (saturated cores, bad columns, cosmics): filled from their
+    # neighbours for display, so bright stars are not shown with holes
+    q = np.clip(np.rint(ENC_C + ENC_B * np.arcsinh(fill_nan_display(crops) / ENC_A)), 0, 255).astype(np.uint8)
     p = out_dir / f"c{tag}_frames.png"
     Image.fromarray(q.reshape(n * size, size), mode="L").save(p, optimize=True)
     meta = {"file": p.name, "size": size, "n": n, "enc": [ENC_A, ENC_B, ENC_C], "track": track,
             "dt_min": [round(float(t), 3) for t in dts]}
     try:
-        meta["shift"] = local_star_shifts(crops)
+        meta["shift"] = local_star_shifts(crops, exclude=track, exclude_r=max(6.0, size / 8))
+    except Exception:          # noqa: BLE001 – a viewer aid, never fail the job
+        pass
+    try:                       # missing (masked) pixels on the track, per frame – why a value may be 0
+        yy, xx = np.mgrid[:size, :size]
+        meta["nan_on_track"] = [int(np.isnan(crops[i][(xx - tx) ** 2 + (yy - ty) ** 2 <= 9]).sum())
+                                for i, (tx, ty) in enumerate(track)]
     except Exception:          # noqa: BLE001 – a viewer aid, never fail the job
         pass
     if amp is not None:        # throughput of every frame at the crop centre (obstruction, cirrus)
@@ -207,9 +259,11 @@ def write_motion_frames(out_dir: Path, tag: str, cube: np.ndarray, dts: np.ndarr
 
 def write_candidate_images(out_dir: Path, cid: int | str, crops: np.ndarray, segments: int = 3,
                            scale: int = 3, diff_crops: np.ndarray | None = None,
-                           fwhm: float = 2.5) -> dict[str, str]:
+                           fwhm: float = 2.5, motion_crops: np.ndarray | None = None) -> dict[str, str]:
     """mean / median stacks along the track, animated sub-stacks and (optionally,
-    ``diff_crops`` = 2-D SNR map along the track) the significance map."""
+    ``diff_crops`` = 2-D SNR map along the track) the significance map; ``motion_crops`` =
+    the frames minus the static sky (per-pixel temporal median) along the track → "motion layer"
+    (like Tycho's Abv): stars cancel, only what moves with the track stays."""
     out_dir.mkdir(parents=True, exist_ok=True)
     tag = f"{cid:04d}" if isinstance(cid, int) else str(cid)
     n = crops.shape[0]
@@ -233,6 +287,31 @@ def write_candidate_images(out_dir: Path, cid: int | str, crops: np.ndarray, seg
     p = out_dir / f"c{tag}_sub.gif"
     frames[0].save(p, save_all=True, append_images=frames[1:], duration=500, loop=0)
     files["gif"] = p.name
+    if motion_crops is not None:
+        # each frame in its own noise units; star residuals (PSF/seeing changes, twilight) are
+        # single-frame outliers of either sign → clipped per pixel; light smoothing at the PSF scale
+        from scipy import ndimage
+        R = np.asarray(motion_crops, np.float32)
+        with np.errstate(invalid="ignore"), warnings.catch_warnings():
+            warnings.simplefilter("ignore", RuntimeWarning)
+            flat = R.reshape(len(R), -1)
+            md = np.nanmedian(flat, axis=1)
+            sf = 1.4826 * np.nanmedian(np.abs(flat - md[:, None]), axis=1)
+            sf = np.where(np.isfinite(sf) & (sf > 0), sf, np.nan)[:, None, None]
+            Z = R / sf
+            Z = np.where(np.abs(Z) > 4.0, np.nan, Z)
+        m = _nanmean(Z, axis=0)
+        fin0 = np.isfinite(m)
+        m = ndimage.gaussian_filter(np.where(fin0, m, 0.0), max(0.5, 0.6 * fwhm / 2.355))
+        m = np.where(fin0, m, np.nan)
+        fin = np.isfinite(m)
+        if fin.any():
+            mv = m[fin]
+            med0 = float(np.median(mv))
+            s0 = float(1.4826 * np.median(np.abs(mv - med0))) or 1.0
+            p = out_dir / f"c{tag}_abv.png"
+            to_u8(np.where(fin, m, med0), med0 - 2.0 * s0, med0 + 12.0 * s0, scale=scale).save(p)
+            files["abv"] = p.name
     if diff_crops is not None:
         # significance map: sum of the filtered unit-noise frames along the track / σ_sum
         d = np.nan_to_num(diff_crops)

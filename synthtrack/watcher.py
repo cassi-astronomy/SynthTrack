@@ -6,9 +6,15 @@ that contains FITS frames. It is considered complete when it holds at least
 ``settle_seconds``. Polling is used on purpose: it works on network shares
 and on Windows/Linux alike, where file-system events are unreliable.
 
-Each processed directory is remembered in ``watch_state.json`` so it is not
+Each processed set is remembered in ``watch_state.json`` so it is not
 processed twice; a directory that receives more frames later can be re-run
-manually.
+manually. The key is the path *relative to the root* plus the name of the first
+frame, so the root folder may be renamed or moved (just point the setting at
+the new place) without anything being processed again, while a different set
+that happens to reuse a folder name is still recognised as new.
+
+Typical layout: ``<root>/<field>/[WF0/]*.fits`` – one folder per field and
+telescope; the telescope is recognised from the header rules of the profiles.
 """
 from __future__ import annotations
 
@@ -38,6 +44,8 @@ class Watcher:
         self.last_scan: float | None = None
         self.pending: dict[str, dict] = {}       # dir -> {"count", "age_s"}
         self.messages: list[str] = []
+        self._warned: dict[str, str] = {}     # dir -> last 'not identified' reason
+        self._ident: dict[str, tuple] = {}     # set key -> (instrument id, reason, profiles mtime)
 
     # ---- state -------------------------------------------------------
     def _load(self) -> dict:
@@ -72,8 +80,19 @@ class Watcher:
                 "config": self.settings.watch.__dict__}
 
     def forget(self, directory: str) -> None:
-        self.state["processed"].pop(directory, None)
+        proc = self.state["processed"]
+        for k in [k for k, v in proc.items() if k == directory or (isinstance(v, dict) and v.get("dir") == directory)]:
+            proc.pop(k, None)
         self._save()
+
+    @staticmethod
+    def set_key(root: Path, d: Path, files: list[Path]) -> str:
+        rel = d.relative_to(root).as_posix() if d != root else "."
+        return f"{rel}::{files[0].name}"
+
+    def _is_processed(self, key: str, d: Path) -> bool:
+        proc = self.state["processed"]
+        return key in proc or str(d) in proc            # str(d): state files from older versions
 
     # ---- loop --------------------------------------------------------
     def _loop(self) -> None:
@@ -104,20 +123,29 @@ class Watcher:
         pending = {}
         now = time.time()
         for d in dirs:
-            key = str(d)
-            if key in self.state["processed"]:
-                continue
             files = list_fits(d)
             if not files or _is_calibration_dir(files):
                 continue
+            skey = self.set_key(root, d, files)
+            if self._is_processed(skey, d):
+                continue
+            key = str(d)                                     # shown in the GUI
             newest = max(f.stat().st_mtime for f in files)
             age = now - newest
-            pending[key] = {"count": len(files), "age_s": round(age)}
+            if cfg.instrument:
+                inst_id, why = cfg.instrument, "pevně nastavený přístroj"
+            else:
+                inst_id, why = self._identify(skey, files, complete=len(files) >= cfg.frames_per_set)
+            pending[key] = {"count": len(files), "age_s": round(age), "instrument": inst_id}
+            if not inst_id:
+                pending[key]["error"] = why
             if len(files) >= cfg.frames_per_set and age >= cfg.settle_seconds:
-                inst_id = cfg.instrument or self._instrument_for(files[0])
                 if not inst_id:
-                    self._msg(f"{d}: žádný profil přístroje neodpovídá hlavičce – přeskočeno.")
-                    self.state["processed"][key] = {"time": now, "job": None, "error": "no instrument"}
+                    # not marked processed: after the rules are fixed the set starts by itself
+                    pending[key]["error"] = why
+                    if self._warned.get(key) != why:
+                        self._warned[key] = why
+                        self._msg(f"{d}: přístroj nerozpoznán – {why}. Čeká na úpravu pravidel v Přístroje.")
                     continue
                 # pre-sorted fields (root/<field>/…) are separate folders -> separate jobs
                 name = f"{root.name}/{d.relative_to(root).as_posix()}" if d != root else d.name
@@ -133,19 +161,35 @@ class Watcher:
                     for note in fs.notes + skipped:
                         self.jobs.log(job.id, note)
                     self.runner.submit(job)
-                    self._msg(f"Spuštěna úloha {job.id} pro {d} – {job.name} ({job.n_frames or len(files)} snímků)")
+                    self._msg(f"Spuštěna úloha {job.id} pro {d} – {job.name} ({job.n_frames or len(files)} snímků, {why})")
+                    self.jobs.log(job.id, f"Přístroj: {inst_id} ({why})")
                     started.append(job.id)
-                self.state["processed"][key] = {"time": now, "job": jobs[0].id if jobs else None,
-                                                "jobs": [j.id for j in jobs]}
+                self.state["processed"][skey] = {"time": now, "dir": key, "instrument": inst_id,
+                                                 "job": jobs[0].id if jobs else None,
+                                                 "jobs": [j.id for j in jobs]}
+                self._ident.pop(skey, None)
                 pending.pop(key, None)
         self.pending = pending
         self._save()
         return started
+
+    def _identify(self, skey: str, files: list[Path], complete: bool) -> tuple[str | None, str]:
+        """Instrument of a set, cached until the profiles change; checked again on all
+        three sample frames once the set is complete (the last frame has arrived)."""
+        idir = Path(self.settings.instruments_dir)
+        stamp = max((p.stat().st_mtime for p in idir.glob("*.toml")), default=0.0)
+        hit = self._ident.get(skey)
+        if hit and hit[2] == stamp and (hit[3] or not complete):
+            return hit[0], hit[1]
+        store = InstrumentStore(idir)
+        found, why = store.identify_files(files) if complete else store.identify_files(files[:1])
+        self._ident[skey] = (found.id if found else None, why, stamp, complete)
+        return (found.id if found else None), why
 
     def _instrument_for(self, fits_path: Path) -> str | None:
         try:
             hdr = fits.getheader(fits_path)
         except Exception:
             return None
-        inst = InstrumentStore(self.settings.instruments_dir).find_for_header(hdr)
+        inst, _ = InstrumentStore(self.settings.instruments_dir).identify(hdr)
         return inst.id if inst else None

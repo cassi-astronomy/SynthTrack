@@ -10,7 +10,7 @@ from synthtrack.sky import _urls, fetch
 
 
 def test_fast_reference_services_are_tried_before_cds():
-    urls = list(_urls(257.211583, -22.818194, 0.10333, "DSS2c", 400))
+    urls = list(_urls(257.211583, -22.818194, 0.10333, "DSS2r", 400))
     assert [name for name, _ in urls] == ["STScI DSS", "NASA SkyView", "CDS hips2fits",
                                             "CDS hips2fits (zrcadlo)"]
     q = parse_qs(urlparse(urls[0][1]).query)
@@ -33,9 +33,11 @@ def test_fetch_returns_first_valid_image_without_touching_slow_fallbacks():
             return Response()
 
     session = Session()
-    data, content_type, source = fetch(10, 20, 0.1, session=session)
-    assert len(data) == 2000 and content_type == "image/gif" and source == "STScI DSS"
-    assert len(session.calls) == 1 and session.calls[0][1] == (2.5, 6.0)
+    data, content_type, source = fetch(10, 20, 0.1, "DSS2r", session=session)
+    # STScI must return FITS (resampled north-up, 16. 11.): a GIF is skipped, SkyView takes it
+    assert len(data) == 2000 and content_type == "image/gif" and source == "NASA SkyView"
+    assert len(session.calls) == 2 and session.calls[0][1] == (2.5, 6.0)
+    assert "f=fits" in session.calls[0][0]
 
 
 def test_local_sky_matrix_preserves_arbitrary_rotation_and_scale():
@@ -51,3 +53,8 @@ def test_local_sky_matrix_preserves_arbitrary_rotation_and_scale():
     area_scale = abs(matrix[0][0] * matrix[1][1] - matrix[0][1] * matrix[1][0]) ** 0.5 * 3600
     assert area_scale == pytest.approx(6.4, rel=2e-4)
     assert abs(matrix[0][1]) > 0.5 * abs(matrix[0][0])  # not collapsed to a 90-degree transform
+
+
+def test_colour_dss_asks_cds_first_and_labels_red_fallbacks():
+    names = [n for n, _ in _urls(10, 20, 0.1, "DSS2c", 400)]
+    assert names[0] == "CDS hips2fits" and all("jen červený" in n for n in names[2:])

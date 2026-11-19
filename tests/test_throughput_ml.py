@@ -346,5 +346,22 @@ def test_transient_mask_area_fuse_refuses_catastrophic_mask():
     assert np.isfinite(frame).all()
 
 
-def test_destructive_transient_masking_defaults_off():
-    assert SearchSettings().mask_transients is False
+def test_transient_masking_defaults_on():
+    # the 8-neighbour masker with its area fuse is safe for bright stars; without it
+    # saturated satellite trails mask whole regions (305/pole 1: Unitas, Tatjana, Atropos)
+    assert SearchSettings().mask_transients is True
+
+
+def test_masked_star_core_renders_bright_not_as_hole():
+    from synthtrack.imaging import fill_nan_display
+    yy, xx = np.mgrid[:40, :40]
+    star = 200.0 * np.exp(-((xx - 20) ** 2 + (yy - 20) ** 2) / (2 * 1.2 ** 2))
+    img = star.astype(np.float32)
+    img[19:22, 19:22] = np.nan                      # saturated core masked by calibration
+    img[:, 5] = np.nan                              # bad column in the sky
+    out = fill_nan_display(img)
+    assert np.isfinite(out).all()
+    assert out[20, 20] > 20                         # the core stays bright (far above the sky)
+    assert abs(out[30, 5]) < 1                      # the column gets the sky
+    rendered = np.asarray(to_u8(img, -2, 20, scale=1, gamma=1))
+    assert rendered[20, 20] == 255

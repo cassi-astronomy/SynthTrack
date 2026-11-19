@@ -1,13 +1,14 @@
 """Local web GUI + REST API (FastAPI). Start with ``synthtrack serve``."""
 from __future__ import annotations
 
+import json
 import os
 import string
 import threading
 from pathlib import Path
 
 from fastapi import Body, FastAPI, HTTPException
-from fastapi.responses import FileResponse, PlainTextResponse
+from fastapi.responses import FileResponse, PlainTextResponse, Response
 from fastapi.staticfiles import StaticFiles
 
 from .. import __version__
@@ -16,7 +17,7 @@ from ..confidence import annotate as annotate_confidence
 from ..astrometry import find_astap
 from ..export import export_csv, export_mpc80
 from ..fields import create_tree_jobs, find_light_dirs, rel_name, split_fields
-from ..fitsmeta import list_fits, read_meta
+from ..fitsmeta import frame_groups, list_fits, read_meta
 from ..gpu import get_backend, live_status
 from ..instruments import InstrumentStore, instrument_from_dict
 from ..jobs import JobRunner, JobStore
@@ -27,6 +28,15 @@ from ..settings import Settings
 from ..watcher import Watcher
 
 STATIC = Path(__file__).parent / "static"
+
+
+def _np_default(o):
+    import numpy as np
+    if isinstance(o, np.generic):
+        return o.item()
+    if isinstance(o, np.ndarray):
+        return o.tolist()
+    raise TypeError(f"not serialisable: {type(o)}")
 
 
 def create_app(settings: Settings, start_worker: bool = True) -> FastAPI:
@@ -69,7 +79,16 @@ def create_app(settings: Settings, start_worker: bool = True) -> FastAPI:
             "current_job": runner.current if runner else None,
             "watch": watcher.status() if watcher else None,
             "online": settings.online.__dict__,
+            "ucac4": _ucac4_status(),
         }
+
+    def _ucac4_status():
+        from ..ucac4 import find_root
+        if not settings.ucac4_dir:
+            return {"set": False, "ok": False, "path": ""}
+        root = find_root(settings.ucac4_dir)
+        n = len([f for f in root.iterdir() if f.name.lower().startswith("z")]) if root else 0
+        return {"set": True, "ok": root is not None, "path": str(root or settings.ucac4_dir), "zones": n}
 
     # ---------------------------------------------------------------- settings
     @app.get("/api/settings")
@@ -130,6 +149,7 @@ def create_app(settings: Settings, start_worker: bool = True) -> FastAPI:
             files = list_fits(dirs[0])
             meta = read_meta(files[len(files) // 2], inst)
             return {"frames": len(files), "meta": meta.to_dict(), "fields": split_of(files),
+                    "groups": frame_groups(files, inst),
                     "selection": {k: v.to_dict() for k, v in lib.select_all(meta).items()}}
         # pre-sorted fields: one sub-folder = one field (each may still be split further)
         out, metas = [], []
@@ -144,8 +164,29 @@ def create_app(settings: Settings, start_worker: bool = True) -> FastAPI:
             sel = lib.select_all(m)
             bad = [f"{v.kind}: {v.reason}" for k, v in sel.items() if k != "bias" and not v.ok]
             d["masters_ok"], d["masters_note"] = not bad, "; ".join(bad)
+        allfiles = [f for d in dirs for f in list_fits(d)]
         return {"frames": sum(d["frames"] for d in out), "meta": meta.to_dict(), "fields": None, "dirs": out,
+                "groups": frame_groups(allfiles, inst),
                 "selection": {k: v.to_dict() for k, v in lib.select_all(meta).items()}}
+
+    @app.post("/api/identify")
+    def identify(data: dict = Body(...)):
+        """Which instrument profile the frames in ``lights_dir`` belong to (header rules)."""
+        root = data.get("lights_dir", "")
+        dirs = find_light_dirs(root, _master_dirs()) if root else []
+        if not dirs:
+            return {"instrument_id": None, "reason": "v adresáři nejsou FITS snímky"}
+        res = []
+        for d in dirs[:20]:
+            inst, why = instruments.identify_files(list_fits(d))
+            res.append((inst.id if inst else None, why))
+        bad = [why for i, why in res if i is None]
+        if bad:
+            return {"instrument_id": None, "reason": bad[0]}
+        ids = sorted({i for i, _ in res})
+        if len(ids) > 1:
+            return {"instrument_id": None, "reason": "podadresáře jsou z různých přístrojů: " + ", ".join(ids)}
+        return {"instrument_id": ids[0], "reason": res[0][1]}
 
     def _master_dirs():
         return [i.masters_dir for i in instruments.list() if i.masters_dir]
@@ -267,7 +308,10 @@ def create_app(settings: Settings, start_worker: bool = True) -> FastAPI:
     def candidates(job_id: str):
         _job(job_id)
         # computed on every read: works for older jobs and follows a retrained classifier
-        return annotate_confidence(jobs.read_json(job_id, "candidates.json", []))
+        data = annotate_confidence(jobs.read_json(job_id, "candidates.json", []))
+        # serialised directly: FastAPI's generic encoder needs seconds for thousands of candidates
+        return Response(json.dumps(data, separators=(",", ":"), ensure_ascii=False, default=_np_default),
+                        media_type="application/json")
 
     @app.patch("/api/jobs/{job_id}/candidates/{cid}")
     def update_candidate(job_id: str, cid: int, data: dict = Body(...)):
@@ -314,7 +358,7 @@ def create_app(settings: Settings, start_worker: bool = True) -> FastAPI:
             size = (c.get("images") or {}).get("frames", {}).get("size") or 64
             fov = size * float((job.summary or {}).get("pixel_scale") or 1.0) / 3600.0
         fov = float(min(max(fov, 0.01), 2.0))
-        cache = jobs.job_dir(job_id) / "img" / f"sky_{cid}_{survey}_{int(round(fov * 3600))}.img"
+        cache = jobs.job_dir(job_id) / "img" / f"sky3_{cid}_{survey}_{int(round(fov * 3600))}.img"   # sky3: STScI north-up (16. 11.), colour only from CDS (17. 11.)
         meta = cache.with_suffix(".txt")
         if cache.exists() and meta.exists():
             ct, src = meta.read_text(encoding="utf-8").split("\n", 1)
@@ -327,6 +371,110 @@ def create_app(settings: Settings, start_worker: bool = True) -> FastAPI:
         cache.write_bytes(data)
         meta.write_text(f"{ct}\n{src}", encoding="utf-8")
         return Response(data, media_type=ct, headers={"X-Sky-Source": src})
+
+    # ------------------------------------------------------------ VSX variables in the DSS view
+    _vsx_cache: dict = {}
+
+    def _vsx_table():
+        """ASTAP variable_stars_13.csv (AAVSO VSX to ~18 mag), loaded once."""
+        astap_exe = find_astap(settings.astap.executable)
+        cands = []
+        if settings.astap.database_dir:
+            cands.append(Path(settings.astap.database_dir))
+        if astap_exe:
+            cands.append(Path(astap_exe).parent)
+        path = next((d / "variable_stars_13.csv" for d in cands if (d / "variable_stars_13.csv").exists()), None)
+        if path is None:
+            return None
+        if _vsx_cache.get("path") != str(path):
+            from .. import twilight as TW
+            _vsx_cache.clear()
+            _vsx_cache.update(path=str(path), data=TW.load_variables(path, max_mag=None))
+        return _vsx_cache["data"]
+
+    @app.get("/api/jobs/{job_id}/candidates/{cid}/vsx")
+    def vsx_near(job_id: str, cid: int, fov: float = 0.1):
+        """Variable stars in the DSS cut-out: AAVSO VSX → VizieR B/vsx mirrors → ASTAP (offline).
+        Each with name, type, range, period, link and offsets east/north (deg); cached per cut-out."""
+        import math
+        from .. import vsx as VSX
+        c = next((x for x in jobs.read_json(job_id, "candidates.json", []) if x["id"] == cid), None)
+        if c is None or c.get("ra") is None:
+            raise HTTPException(404, "Kandidát nemá souřadnice")
+        fov = float(min(max(fov, 0.005), 2.0))
+        half = 0.75 * fov
+        ra0, de0 = float(c["ra"]), float(c["dec"])
+        cache = jobs.job_dir(job_id) / "img" / f"vsx_{cid}_{int(round(fov * 3600))}.json"
+        if cache.exists():
+            try:
+                return json.loads(cache.read_text(encoding="utf-8"))
+            except ValueError:
+                pass
+        note = None
+        if settings.online.sky_images:
+            try:
+                stars, src = VSX.query(ra0, de0, half * math.sqrt(2.0))
+                res = {"stars": VSX.offsets(stars, ra0, de0), "source": src}
+                cache.parent.mkdir(parents=True, exist_ok=True)
+                cache.write_text(json.dumps(res), encoding="utf-8")
+                return res
+            except RuntimeError as e:
+                note = f"online nedostupné ({e}) – použit ASTAP"
+        var = _vsx_table()
+        if var is None:
+            raise HTTPException(404, "VSX ani VizieR neodpovídají a katalog proměnných ASTAP "
+                                     "(variable_stars_13.csv) nenalezen – nastavte složku ASTAP v Nastavení.")
+        stars = VSX.from_astap(var, ra0, de0, half)
+        return {"stars": VSX.offsets(stars, ra0, de0), "source": "ASTAP (offline, VSX do ~18 mag)", "note": note}
+
+    # ------------------------------------------------------------ ranging (12–48 h ephemeris)
+    def _fov_deg(job, cands) -> list[float] | None:
+        """Field of view (width, height) in degrees: FITS size × pixel scale, else candidate extent."""
+        scale = float((job.summary or {}).get("pixel_scale") or 0)
+        if not scale:
+            return None
+        w = h = 0
+        try:
+            from astropy.io import fits
+            f = next((p for p in (job.files or []) if Path(p).exists()), None)
+            if f:
+                hd = fits.getheader(f)
+                w, h = int(hd.get("NAXIS1", 0)), int(hd.get("NAXIS2", 0))
+        except Exception:                 # noqa: BLE001 – the plot works without it
+            w = h = 0
+        if not (w and h) and cands:
+            w = int(max(c["x"] for c in cands) + 1)
+            h = int(max(c["y"] for c in cands) + 1)
+        return [w * scale / 3600, h * scale / 3600] if w and h else None
+
+    @app.get("/api/jobs/{job_id}/candidates/{cid}/ranging")
+    def ranging(job_id: str, cid: int, model: str = "all", hours: str = "12,18,24,36,48", rho_min: float = 0.003):
+        from .. import ranging as RGN
+        job = _job(job_id)
+        S = job.summary or {}
+        cands = jobs.read_json(job_id, "candidates.json", [])
+        c = next((x for x in cands if x["id"] == cid), None)
+        if c is None:
+            raise HTTPException(404, "Kandidát neexistuje")
+        if S.get("mjd_ref") is None or not S.get("site"):
+            raise HTTPException(400, "Úloha nemá čas reference nebo polohu observatoře – ranging nelze spočítat.")
+        if model not in RGN.MODELS:
+            model = "all"
+        try:
+            hh = [float(x) for x in hours.split(",") if x.strip()][:12]
+        except ValueError:
+            hh = [12, 18, 24, 36, 48]
+        hh = [h for h in hh if 0 < h <= 24 * 30] or [12, 18, 24, 36, 48]
+        try:
+            out = RGN.run(c, float(S["mjd_ref"]), S["site"], hours=hh, model=model,
+                          pixel_scale=S.get("pixel_scale"), seed=cid,
+                          rho_min=float(min(max(rho_min, 0.001), 5.0)))
+        except ValueError as e:
+            raise HTTPException(400, f"Ranging nelze spočítat: {e}")
+        out["fov_deg"] = _fov_deg(job, cands)
+        out["rho_min"] = float(min(max(rho_min, 0.001), 5.0))
+        out["models"] = RGN.MODELS
+        return Response(json.dumps(out, default=_np_default, ensure_ascii=False), media_type="application/json")
 
     # ------------------------------------------------------------ classifier
     def _rescore_all(model) -> int:
@@ -384,7 +532,7 @@ def create_app(settings: Settings, start_worker: bool = True) -> FastAPI:
             fr = jobs.read_json(job_id, "frames.json", {})
             obs_code = job.summary.get("observatory_code") or settings.observatory_code
             return export_mpc80(cands, job.summary.get("mjd_ref", 0), fr.get("mjd", []), obs_code,
-                                job.summary.get("filter", "G")[:1])
+                                job.summary.get("filter", "G")[:1], summary=job.summary)
         raise HTTPException(400, "Formát: csv | mpc80")
 
     # ---------------------------------------------------------------- catalogs
@@ -454,7 +602,17 @@ def create_app(settings: Settings, start_worker: bool = True) -> FastAPI:
     # ------------------------------------------------------------------ static
     @app.get("/")
     def index():
-        return FileResponse(STATIC / "index.html")
+        # cache-busting: the browser (or the desktop web view, where Ctrl+F5 may not exist) kept an
+        # old style.css / app.js after an update – the files get their modification time as ?v=
+        from fastapi.responses import HTMLResponse
+        html = (STATIC / "index.html").read_text(encoding="utf-8")
+        for name in ("style.css", "app.js"):
+            try:
+                v = int((STATIC / name).stat().st_mtime)
+            except OSError:
+                continue
+            html = html.replace(f'/static/{name}"', f'/static/{name}?v={v}"')
+        return HTMLResponse(html, headers={"Cache-Control": "no-cache"})
 
     app.mount("/static", StaticFiles(directory=STATIC), name="static")
     app.state.settings = settings

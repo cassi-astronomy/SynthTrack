@@ -108,23 +108,31 @@ class Instrument:
         aliases = {**DEFAULT_FILTER_ALIASES, **{k.lower(): v for k, v in self.filter_aliases.items()}}
         return aliases.get(key, raw)
 
-    def matches_header(self, header) -> bool:
-        """True if all ``match`` rules are satisfied (case-insensitive substring)."""
+    def match_details(self, header) -> list[str] | None:
+        """Satisfied ``match`` rules as "KEY=value" strings, or None if any rule fails.
+
+        Strings: case-insensitive substring; numbers: ± max(1, 2 %)."""
         if not self.match:
-            return False
+            return None
+        hits = []
         for key, expected in self.match.items():
             val = header.get(key)
             if val is None:
-                return False
+                return None
             if isinstance(expected, (int, float)) and not isinstance(expected, bool):
                 try:
                     if abs(float(val) - float(expected)) > max(1.0, 0.02 * abs(float(expected))):
-                        return False
+                        return None
                 except (TypeError, ValueError):
-                    return False
+                    return None
             elif str(expected).lower() not in str(val).lower():
-                return False
-        return True
+                return None
+            hits.append(f"{key}={val}")
+        return hits
+
+    def matches_header(self, header) -> bool:
+        """True if all ``match`` rules are satisfied (case-insensitive substring)."""
+        return self.match_details(header) is not None
 
     def to_dict(self) -> dict:
         return {k: v for k, v in asdict(self).items() if v is not None}
@@ -179,10 +187,47 @@ class InstrumentStore:
         self.path(inst_id).unlink(missing_ok=True)
 
     def find_for_header(self, header) -> Instrument | None:
+        return self.identify(header)[0]
+
+    def identify(self, header) -> tuple[Instrument | None, str]:
+        """Profile whose ``match`` rules fit the header, with a human readable reason.
+
+        Several fitting profiles: the most specific one (most rules) wins; a tie
+        is ambiguous and returns None, so a set is never processed with a guess."""
+        hits = []
         for inst in self.list():
-            if inst.matches_header(header):
-                return inst
-        return None
+            det = inst.match_details(header)
+            if det is not None:
+                hits.append((inst, det))
+        if not hits:
+            return None, f"žádný profil přístroje neodpovídá hlavičce ({header_summary(header)})"
+        hits.sort(key=lambda t: -len(t[1]))
+        if len(hits) > 1 and len(hits[0][1]) == len(hits[1][1]):
+            tied = [h[0].id for h in hits if len(h[1]) == len(hits[0][1])]
+            return None, (f"hlavičce odpovídá více profilů ({', '.join(tied)}) – zpřesněte pravidla "
+                          f"v Přístroje ({header_summary(header)})")
+        inst, det = hits[0]
+        return inst, f"{inst.name or inst.id} podle {', '.join(det)}"
+
+    def identify_files(self, files: list) -> tuple[Instrument | None, str]:
+        """Identify a set of frames: first, middle and last frame must agree."""
+        from astropy.io import fits
+        if not files:
+            return None, "žádné snímky"
+        picks = sorted({0, len(files) // 2, len(files) - 1})
+        found: dict[str, tuple[Instrument | None, str]] = {}
+        for i in picks:
+            try:
+                hdr = fits.getheader(files[i])
+            except Exception as e:  # noqa: BLE001
+                return None, f"nelze přečíst hlavičku {Path(files[i]).name}: {e}"
+            inst, why = self.identify(hdr)
+            if inst is None:
+                return None, f"{Path(files[i]).name}: {why}"
+            found[inst.id] = (inst, why)
+        if len(found) > 1:
+            return None, "snímky v adresáři jsou z různých přístrojů: " + ", ".join(found)
+        return next(iter(found.values()))
 
     @staticmethod
     def _load(p: Path) -> Instrument:
@@ -206,3 +251,11 @@ def instrument_from_dict(d: dict) -> Instrument:
     if inst.observer_alt_m is not None and not -500 <= float(inst.observer_alt_m) <= 10000:
         raise ValueError("Nadmořská výška musí být mezi −500 m a 10 000 m.")
     return inst
+
+
+SUMMARY_KEYS = ("TELESCOP", "INSTRUME", "CCD_NAME", "FOCALLEN", "XPIXSZ")
+
+
+def header_summary(header) -> str:
+    parts = [f"{k}={header.get(k)}" for k in SUMMARY_KEYS if header.get(k) not in (None, "")]
+    return ", ".join(parts) or "bez TELESCOP/INSTRUME"

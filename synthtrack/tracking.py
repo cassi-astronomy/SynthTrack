@@ -293,11 +293,17 @@ class Candidate:
     snr_check: float | None = None        # independent SNR (median template, no search)
     frames_with_signal: float | None = None
     star_ratio: float | None = None       # static sky under the track / peak of the object itself
+    obj_fwhm: float | None = None         # FWHM of the object itself (forward-modelled residual stack)
+    sharp_dchi2: float | None = None      # Δχ² star PSF vs. best width (> 0: data prefer another width)
     static_star_x: float | None = None    # nearest/brightest static-star peak, for lossless GUI grouping
     static_star_y: float | None = None
     throughput_low_frac: float | None = None   # share of frames with throughput < 0.6 on the track
+    throughput_local_frac: float | None = None  # … and < cover_local_ratio × field median of that frame
     throughput_min: float | None = None   # lowest frame throughput along the track (None = no maps)
     ml_score: float | None = None         # probability of a real object from the trained classifier
+    inj_score: float | None = None        # per-run score calibrated on injected movers (rank.py), 0.5 = cut
+    chip_ratio: float | None = None       # signal on a detector-fixed path / on the linear track (warm pixels)
+    noise_scale: float | None = None      # empirical noise of the shift-and-add sum at this velocity / model (≥ 1)
     injected: int | None = None           # id of the synthetic object this detection recovered
     flags: list[str] = field(default_factory=list)
     auto_status: str = "candidate"   # candidate | auto_rejected

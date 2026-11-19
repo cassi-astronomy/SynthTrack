@@ -98,7 +98,39 @@ def _fill_holes(g: np.ndarray) -> np.ndarray:
     return g
 
 
-def measure(reg, stars: np.ndarray, cell: int = 256, r: int = 2, min_stars: int = 4,
+def _aperture_radius(reg, st: np.ndarray) -> int:
+    """Aperture radius ≈ 1.1 FWHM of the stars (second moments of the 50 brightest in a middle
+    frame). A fixed 5×5 px box measured seeing and sub-pixel registration errors as "throughput":
+    SMPH 60 s (FWHM 3.7 px) – the 5×5 flux varied 0.54–0.90 of the 11×11 flux while the 11×11
+    flux was constant within 10 %, frames dropped as "cloud" on a clear night."""
+    n, h, w = reg.shape
+    img = np.asarray(reg[n // 2], np.float32)
+    top = st[np.argsort(-st[:, 2])][:80]
+    yy, xx = np.mgrid[-7:8, -7:8]
+    fw = []
+    for x, y, _ in top:
+        xi, yi = int(round(x)), int(round(y))
+        if xi < 8 or yi < 8 or xi >= w - 8 or yi >= h - 8:
+            continue
+        c = img[yi - 7:yi + 8, xi - 7:xi + 8]
+        if not np.isfinite(c).all():
+            continue
+        c = np.clip(c - np.median(c), 0, None)
+        t = c.sum()
+        if t <= 0:
+            continue
+        cx, cy = (c * xx).sum() / t, (c * yy).sum() / t
+        var = (c * ((xx - cx) ** 2 + (yy - cy) ** 2)).sum() / t / 2
+        fw.append(2.3548 * np.sqrt(max(var, 0.1)))
+        if len(fw) >= 50:
+            break
+    if len(fw) < 5:
+        return 2
+    # moments of a 15×15 box overestimate a Gaussian's FWHM by ~20–40 % (wings, noise)
+    return int(np.clip(round(1.1 * 0.75 * float(np.median(fw))), 2, 6))
+
+
+def measure(reg, stars: np.ndarray, cell: int = 256, r: int | None = None, min_stars: int = 4,
             flux_min: float = 40.0) -> ThroughputMaps | None:
     """Throughput maps from aperture photometry of the reference-frame stars.
 
@@ -112,6 +144,8 @@ def measure(reg, stars: np.ndarray, cell: int = 256, r: int = 2, min_stars: int 
     st = st[np.isfinite(st).all(axis=1)]
     # skip the brightest 3 % (saturation, blooming) and the faintest (noisy)
     st = st[st[:, 2] <= np.percentile(st[:, 2], 97)]
+    if r is None:
+        r = _aperture_radius(reg, st)
     xi = np.rint(st[:, 0]).astype(np.intp)
     yi = np.rint(st[:, 1]).astype(np.intp)
     m = r + 4

@@ -20,7 +20,7 @@ from scipy import ndimage
 
 
 def mask_cosmics(img: np.ndarray, fwhm: float, nsigma: float = 8.0,
-                 max_fraction: float = 0.001) -> int:
+                 max_fraction: float = 0.001, apply: bool = True):
     """Mask isolated cosmic-ray pixels in a σ-unit frame in place.
 
     The operation deliberately favours recall.  A hit must exceed the
@@ -31,10 +31,18 @@ def mask_cosmics(img: np.ndarray, fwhm: float, nsigma: float = 8.0,
     sig = max(fwhm / 2.3548, 0.6)
     psf_ratio = math.exp(1.0 / (2 * sig * sig))
     lim = max(4.0, 2.5 * psf_ratio)
-    a = np.nan_to_num(img, nan=0.0)
-    neighbours = [np.roll(np.roll(a, dy, axis=0), dx, axis=1)
-                  for dy in (-1, 0, 1) for dx in (-1, 0, 1) if dx or dy]
-    nb_max = np.maximum.reduce(neighbours)
+    a = np.nan_to_num(img, nan=0.0).astype(np.float32, copy=False)
+    # maximum of the 8 neighbours, accumulated in place: 3 frames of memory instead
+    # of 16 (8 shifted copies + their stack = 1 GB per 4k frame and thread, which
+    # failed with MemoryError on Windows while frames were warped in parallel)
+    h, w = a.shape
+    p = np.pad(a, 1, mode="edge")
+    nb_max = np.full_like(a, -np.inf)
+    for dy in (-1, 0, 1):
+        for dx in (-1, 0, 1):
+            if dx or dy:
+                np.maximum(nb_max, p[1 + dy:1 + dy + h, 1 + dx:1 + dx + w], out=nb_max)
+    del p
     hit = (a > nsigma) & (a > lim * np.maximum(nb_max, 0.5))
     hit[:1] = hit[-1:] = False
     hit[:, :1] = hit[:, -1:] = False
@@ -49,8 +57,60 @@ def mask_cosmics(img: np.ndarray, fwhm: float, nsigma: float = 8.0,
                    & (a > max(0.5 * nsigma, 4.0)))
     if int(grown.sum()) > max(1, int(max_fraction * finite_count)):
         return 0
+    if not apply:
+        return grown
     img[grown] = np.nan
     return int(grown.sum())
+
+
+def confirm_cosmics(reg, order: list[int], hits: dict, nsigma: float = 8.0, rel: float = 0.3,
+                    win: int = 2, grow: int = 1) -> tuple[int, int]:
+    """Mask cosmic-ray candidates in the registered frames only if they are single-frame.
+
+    ``hits[i]`` = (y, x) sky (reference-grid) coordinates of the candidate pixels of frame
+    ``i``. A candidate whose peak also appears – ≥ ``rel`` × its value within ±``win`` px –
+    in the time-adjacent frames is a real source and keeps its data: in frames with better
+    seeing an undersampled star or a slow asteroid has a peak > 4× its neighbours and was
+    masked whole (88P/Coihueco 9. 11.: 21 % of the star cores and (149) Medusa, (419)
+    Aurelia, (494) Virtus in 3–5 frames each → "nekonzistentní segmenty"). Returns
+    (masked pixels, kept candidates)."""
+    n, h, w = reg.shape
+    pos = {f: k for k, f in enumerate(order)}
+    masked = kept = 0
+    st = np.ones((3, 3), bool)
+    for i, (ys, xs) in hits.items():
+        if len(ys) == 0:
+            continue
+        m = np.zeros((h, w), bool)
+        m[np.clip(ys, 0, h - 1), np.clip(xs, 0, w - 1)] = True
+        lab, nl = ndimage.label(m, structure=st)
+        k = pos[i]
+        nbr = [order[j] for j in (k - 1, k + 1) if 0 <= j < len(order)]
+        bad = np.zeros((h, w), bool)
+        for sl_i, sl in enumerate(ndimage.find_objects(lab), start=1):
+            if sl is None:
+                continue
+            y0, y1 = max(0, sl[0].start - win), min(h, sl[0].stop + win)
+            x0, x1 = max(0, sl[1].start - win), min(w, sl[1].stop + win)
+            here = np.array(reg[i, y0:y1, x0:x1])
+            peak = float(np.nanmax(here)) if np.isfinite(here).any() else 0.0
+            real = False
+            for j in nbr:
+                there = np.array(reg[j, y0:y1, x0:x1])
+                if np.isfinite(there).any() and float(np.nanmax(there)) >= max(rel * peak, 0.5 * nsigma):
+                    real = True
+                    break
+            if real:
+                kept += 1
+            else:
+                bad[sl] |= lab[sl] == sl_i
+        if bad.any():
+            bad = ndimage.binary_dilation(bad, structure=st, iterations=grow)
+            view = reg[i]
+            view[bad] = np.nan
+            del view
+            masked += int(bad.sum())
+    return masked, kept
 
 
 def mask_trails(reg, fwhm: float, band: int = 512, nsigma: float = 4.0, min_len_px: float = 25.0,

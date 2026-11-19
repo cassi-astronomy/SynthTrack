@@ -48,6 +48,44 @@ def header_wcs(header) -> WCS | None:
         return None
 
 
+_SOLVER_WORDS = ("astrometry.net", "astap", "platesolve", "plate solve", "pinpoint", "all sky plate",
+                 "nova.astrometry", "solve-field", "pixinsight", "imagesolver")
+
+
+def header_wcs_kind(header) -> str | None:
+    """"solved" (plate solution) or "pointing" (written from the mount position) – None without WCS.
+
+    Capture programs (INDI, some ASCOM drivers) write CRVAL = the mount's RA/Dec,
+    CRPIX = image centre and CDELT/CROTA from the focal length. That is only as
+    good as the pointing (tens of ″ to arcminutes) – 600 mm !Hunting/308: 37″,
+    (198) Ampella missed by the identification. Any sign of a real solution
+    (CD/PC matrix, SIP, PLTSOLVD, a solver in HISTORY/COMMENT) counts as solved."""
+    if "CTYPE1" not in header or "CRVAL1" not in header:
+        return None
+    if any(k in header for k in ("CD1_1", "PC1_1", "A_ORDER", "PV1_1")) or bool(header.get("PLTSOLVD", False)):
+        return "solved"
+    text = " ".join(str(v) for k in ("HISTORY", "COMMENT") for v in (header.get(k) or []) if v).lower() \
+        if any(k in header for k in ("HISTORY", "COMMENT")) else ""
+    if any(w in text for w in _SOLVER_WORDS):
+        return "solved"
+
+    def num(k):
+        try:
+            return float(header[k])
+        except (KeyError, TypeError, ValueError):
+            return None
+    c1, c2 = num("CRVAL1"), num("CRVAL2")
+    ra, dec = num("RA"), num("DEC")
+    if c1 is not None and ra is not None and dec is not None and c2 is not None:
+        if abs(((c1 - ra + 180) % 360) - 180) * 3600 < 2.0 and abs(c2 - dec) * 3600 < 2.0:
+            return "pointing"                 # CRVAL is the pointing itself
+    p1, p2, n1, n2 = num("CRPIX1"), num("CRPIX2"), num("NAXIS1"), num("NAXIS2")
+    centred = None not in (p1, p2, n1, n2) and abs(p1 - n1 / 2) <= 1.01 and abs(p2 - n2 / 2) <= 1.01
+    if centred and "indi" in text:
+        return "pointing"
+    return "solved"
+
+
 def find_astap(configured: str = "") -> str | None:
     if configured and Path(configured).exists():
         return configured
@@ -57,6 +95,10 @@ def find_astap(configured: str = "") -> str | None:
             return p
     if os.name == "nt":
         for p in WINDOWS_ASTAP:
+            if Path(p).exists():
+                return p
+    else:
+        for p in ("/opt/astap/astap_cli", "/opt/astap/astap", "/usr/local/bin/astap"):
             if Path(p).exists():
                 return p
     return None

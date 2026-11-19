@@ -42,6 +42,9 @@ class JobStore:
         self.dir = Path(directory)
         self.dir.mkdir(parents=True, exist_ok=True)
         self._lock = threading.RLock()
+        # decoded large artefacts (candidates.json: tens of MB, 1.5 s to parse and 3 s to write with
+        # indentation) – a GUI decision must not re-read the file; validated by mtime + size
+        self._cache: dict[Path, tuple[int, int, object]] = {}
 
     def job_dir(self, job_id: str) -> Path:
         return self.dir / job_id
@@ -94,20 +97,32 @@ class JobStore:
 
     def cleanup_work(self, job_id: str) -> None:
         """Drop the scratch directory of a finished/failed/cancelled job."""
+        import os
+        if os.environ.get("SYNTHTRACK_KEEP_WORK") or (self.job_dir(job_id) / "work" / "KEEP").exists():
+            return                     # diagnostics: the pipeline marks work/ to be kept (keep_work)
         shutil.rmtree(self.job_dir(job_id) / "work", ignore_errors=True)
 
     # ---- artefacts ---------------------------------------------------
     def write_json(self, job_id: str, name: str, data) -> None:
-        text = json.dumps(data, indent=1, default=_json_default)
+        text = _dumps(data)
         with self._lock:
-            _atomic_write(self.job_dir(job_id) / name, text)
+            p = self.job_dir(job_id) / name
+            _atomic_write(p, text)
+            self._remember(p, data)
 
     def read_json(self, job_id: str, name: str, default=None):
+        """Decoded artefact. Large files are cached: the result is shared – change it only
+        through ``update_json`` / ``write_json``."""
         p = self.job_dir(job_id) / name
-        if not p.exists():
-            return default
         with self._lock:
-            return json.loads(_read_text(p))
+            hit = self._cached(p)
+            if hit is not None:
+                return hit
+            if not p.exists():
+                return default
+            data = json.loads(_read_text(p))
+            self._remember(p, data)
+            return data
 
     def update_json(self, job_id: str, name: str, update, default=None):
         """Atomically read, mutate and replace a JSON artefact.
@@ -118,10 +133,40 @@ class JobStore:
         """
         p = self.job_dir(job_id) / name
         with self._lock:
-            data = json.loads(_read_text(p)) if p.exists() else default
+            data = self._cached(p)
+            if data is None:
+                data = json.loads(_read_text(p)) if p.exists() else default
             data = update(data)
-            _atomic_write(p, json.dumps(data, indent=1, default=_json_default))
+            _atomic_write(p, _dumps(data))
+            self._remember(p, data)
             return data
+
+    def _cached(self, p: Path):
+        e = self._cache.get(p)
+        if e is None:
+            return None
+        try:
+            st = p.stat()
+        except OSError:
+            self._cache.pop(p, None)
+            return None
+        if (st.st_mtime_ns, st.st_size) != e[:2]:
+            self._cache.pop(p, None)
+            return None
+        return e[2]
+
+    def _remember(self, p: Path, data) -> None:
+        try:
+            st = p.stat()
+        except OSError:
+            return
+        if st.st_size < 1_000_000:          # small files: reading is cheap
+            self._cache.pop(p, None)
+            return
+        self._cache.pop(p, None)
+        self._cache[p] = (st.st_mtime_ns, st.st_size, data)
+        while len(self._cache) > 3:          # the jobs being reviewed
+            self._cache.pop(next(iter(self._cache)))
 
     def log(self, job_id: str, msg: str) -> None:
         with self._lock, open(self.job_dir(job_id) / "log.txt", "a", encoding="utf-8") as fh:
@@ -155,6 +200,11 @@ def _atomic_write(p: Path, text: str) -> None:
     except Exception:
         tmp.unlink(missing_ok=True)
         raise
+
+
+def _dumps(data) -> str:
+    # compact: 5× faster than indent=1 and half the size for 7 600 candidates (88P: 3.2 → 0.7 s)
+    return json.dumps(data, separators=(",", ":"), ensure_ascii=False, default=_json_default)
 
 
 def _read_text(p: Path) -> str:

@@ -21,6 +21,31 @@ from pathlib import Path
 from .settings import load_settings
 
 
+def _crash_log(settings) -> None:
+    """Record why the process died: native crashes (faulthandler, all threads) and
+    uncaught exceptions of any thread go to <data>/synthtrack-crash.log."""
+    import faulthandler
+    import threading
+    import time
+    import traceback
+    from pathlib import Path
+    try:
+        path = Path(settings.root) / "synthtrack-crash.log"
+        fh = open(path, "a", encoding="utf-8", buffering=1)
+        fh.write(f"\n=== start {time.strftime('%Y-%m-%d %H:%M:%S')} pid {__import__('os').getpid()} ===\n")
+        faulthandler.enable(file=fh, all_threads=True)
+        _old = threading.excepthook
+
+        def hook(args):
+            fh.write(f"{time.strftime('%H:%M:%S')} výjimka ve vlákně {args.thread.name if args.thread else '?'}:\n")
+            fh.write("".join(traceback.format_exception(args.exc_type, args.exc_value, args.exc_traceback)))
+            _old(args)
+        threading.excepthook = hook
+        _crash_log.file = fh          # keep the file object alive
+    except OSError:
+        pass
+
+
 def main(argv=None):
     # A Windows service/shortcut may inherit a legacy code page that cannot
     # encode Czech text or the arcsecond symbol and used to abort a CLI job
@@ -56,7 +81,13 @@ def main(argv=None):
     c.add_argument("--file")
 
     sub.add_parser("gpu", help="informace o GPU backendu")
-    sub.add_parser("app", help="spustit jako samostatnou aplikaci v okně (bez prohlížeče)")
+    ex = sub.add_parser("export-data", help="připravit přístroje, mastery, katalogy a nastavení pro jiný počítač")
+    ex.add_argument("dest")
+    ex.add_argument("--no-masters", action="store_true", help="bez master darků/flatů")
+    im = sub.add_parser("import-data", help="převzít data připravená příkazem export-data")
+    im.add_argument("src")
+    ap_app = sub.add_parser("app", help="spustit jako samostatnou aplikaci v okně (bez prohlížeče)")
+    ap_app.add_argument("--port", type=int, default=8766, help="pevný lokální port (obsazený → jiný volný)")
     sub.add_parser("shortcut", help="vytvořit zástupce SynthTrack na ploše a v nabídce Start")
 
     d = sub.add_parser("demo", help="vytvořit syntetickou testovací sekvenci a profil přístroje")
@@ -64,6 +95,8 @@ def main(argv=None):
 
     a = ap.parse_args(argv)
     settings = load_settings(a.data)
+    if a.cmd in ("serve", "app", "run"):
+        _crash_log(settings)
 
     if a.cmd == "serve":
         import uvicorn
@@ -161,7 +194,7 @@ def main(argv=None):
 
     elif a.cmd == "app":
         from .desktop import run_app
-        run_app(settings)
+        run_app(settings, port=a.port)
 
     elif a.cmd == "shortcut":
         from .desktop import create_shortcuts
@@ -171,6 +204,15 @@ def main(argv=None):
         if not made:
             print("Zástupce se nepodařilo vytvořit.")
             sys.exit(1)
+
+    elif a.cmd == "export-data":
+        from .importdata import export_data
+        print("Exportováno do", export_data(settings.root, Path(a.dest), masters=not a.no_masters))
+
+    elif a.cmd == "import-data":
+        from .importdata import import_data
+        notes = import_data(Path(a.src), settings.root)
+        print(f"Importováno do {settings.root}" + (f" – {len(notes)} upozornění výše" if notes else ""))
 
     elif a.cmd == "gpu":
         from .gpu import get_backend

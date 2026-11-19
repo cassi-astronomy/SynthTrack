@@ -2,6 +2,16 @@
 
 __version__ = "0.1.0"
 
+import os as _os
+
+# One BLAS thread per Python thread. SynthTrack parallelises tiles and frames with Python
+# threads; OpenBLAS (NumPy wheels on Windows) then starts its own pool in every one of them
+# and on many-core CPUs runs out of its fixed number of memory buffers – a hard "access
+# violation" inside numpy (tensordot / sort), Coihueco 8.–10. 11. 2026. Must be set before
+# NumPy is imported; an explicit user setting wins.
+for _v in ("OPENBLAS_NUM_THREADS", "OMP_NUM_THREADS", "MKL_NUM_THREADS"):
+    _os.environ.setdefault(_v, "1")
+
 
 def _configure_iers() -> None:
     """Offline-first Earth-orientation data for astropy.

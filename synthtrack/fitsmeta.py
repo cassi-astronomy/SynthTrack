@@ -190,3 +190,29 @@ def load_image(path: str | Path) -> tuple[np.ndarray, fits.Header]:
                     data = data.reshape(data.shape[-2:])
                 return data, hdu.header
     raise ValueError(f"No image data in {path}")
+
+
+def group_key(m) -> str:
+    """Frames that may be stacked together: exposure, filter, binning, size (``frame_group`` job param)."""
+    exp = "?" if m.exptime is None else f"{float(m.exptime):g}"
+    return f"{exp}|{m.filter}|{m.xbin}x{m.ybin}|{m.width}x{m.height}"
+
+
+def group_label(m, n: int) -> str:
+    exp = "?" if m.exptime is None else f"{float(m.exptime):g} s"
+    return f"{exp}, filtr {m.filter}, bin {m.xbin}x{m.ybin}, {m.width}×{m.height} – {n} snímků"
+
+
+def frame_groups(paths, inst, max_files: int = 3000) -> list[dict]:
+    """Groups of stackable frames in ``paths``, largest first (headers only)."""
+    from collections import Counter
+    metas, cnt = {}, Counter()
+    for p in list(paths)[:max_files]:
+        try:
+            m = read_meta(p, inst)
+        except Exception:      # noqa: BLE001 – unreadable files are reported elsewhere
+            continue
+        k = group_key(m)
+        cnt[k] += 1
+        metas.setdefault(k, m)
+    return [{"key": k, "n": c, "label": group_label(metas[k], c)} for k, c in cnt.most_common()]

@@ -41,6 +41,10 @@ class KnownObject:
     forced_snr: float | None = None      # SNR measured on the predicted track
     forced_dxy: list | None = None       # offset (px) of the best forced position
     forced_note: str | None = None       # why the forced SNR may be unreliable (star on the track …)
+    forced_noise: float | None = None    # empirical noise of the forced sum (random tracks, 1 = model)
+    saturated: dict | None = None        # saturated mover found on the predicted track (holes moving with it)
+    mag_measured: float | None = None    # photometry (zero point from the field's known asteroids)
+    images: dict | None = None           # {"frames": strip meta} for the GUI preview (predicted track)
 
     def to_dict(self):
         return asdict(self)
@@ -372,8 +376,14 @@ def predict_field(mpcorb: dict | None, comets: dict | None, t_utc: Time, ra0: fl
 
 
 def match_candidates(cands, known: list[KnownObject], tol_arcsec: float, rate_tol_frac: float = 0.35,
-                     rate_tol_abs: float = 0.05) -> None:
-    """Attach the nearest compatible known object to each candidate (in place)."""
+                     rate_tol_abs: float = 0.05, comet_tol_arcsec: float | None = None) -> None:
+    """Attach the nearest compatible known object to each candidate (in place).
+
+    Comets get the wider ``comet_tol_arcsec``: their orbits (non-gravitational forces,
+    short arcs) are often off by arc minutes – 11P/Tempel-Swift-LINEAR (Coihueco,
+    8. 11. 2026) was detected 84″ from the CometEls prediction with the predicted motion
+    (1.63 vs 1.56″/min, PA 161 vs 160°). The velocity vector must still agree."""
+    ctol = max(tol_arcsec, comet_tol_arcsec or tol_arcsec)
     if not known:
         return
     # strongest real candidates claim known objects first
@@ -385,10 +395,12 @@ def match_candidates(cands, known: list[KnownObject], tol_arcsec: float, rate_to
             continue
         sep = _sep_deg(c.ra, c.dec, kra, kdec) * 3600
         order = np.argsort(sep)
-        for j in order[:5]:
-            if sep[j] > tol_arcsec:
+        for j in order[:8]:
+            if sep[j] > ctol:
                 break
             k = known[j]
+            if sep[j] > (ctol if k.kind == "comet" else tol_arcsec):
+                continue
             if c.rate_arcsec_min is not None and c.pa_deg is not None:
                 cpa, kpa = math.radians(c.pa_deg), math.radians(k.pa_deg)
                 # Compare the full sky-plane velocity vector. Equal speed in the

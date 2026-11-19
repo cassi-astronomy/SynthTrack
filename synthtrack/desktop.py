@@ -26,10 +26,19 @@ from .gpu import NO_WINDOW
 ICON_DIR = Path(__file__).parent / "web" / "static"
 
 
-def _free_port() -> int:
-    with socket.socket() as s:
-        s.bind(("127.0.0.1", 0))
-        return s.getsockname()[1]
+APP_PORT = 8766          # fixed, so the running app is also at http://127.0.0.1:8766 in a browser
+
+
+def _free_port(preferred: int = 0) -> int:
+    """``preferred`` if it is free on 127.0.0.1, otherwise any free port."""
+    for p in ((preferred, 0) if preferred else (0,)):
+        with socket.socket() as s:
+            try:
+                s.bind(("127.0.0.1", p))
+            except OSError:
+                continue
+            return s.getsockname()[1]
+    raise OSError("žádný volný port")
 
 
 class DesktopApi:
@@ -78,7 +87,7 @@ class DesktopApi:
             return False
 
 
-def run_app(settings, width: int = 1500, height: int = 950) -> None:
+def run_app(settings, width: int = 1500, height: int = 950, port: int = APP_PORT) -> None:
     try:
         import webview
     except ImportError:
@@ -93,7 +102,11 @@ def run_app(settings, width: int = 1500, height: int = 950) -> None:
         log = open(Path(settings.root) / "synthtrack-app.log", "a", encoding="utf-8", buffering=1)
         sys.stdout = sys.stdout or log
         sys.stderr = sys.stderr or log
-    port = _free_port()
+    want = port
+    port = _free_port(want)
+    if want and port != want:
+        print(f"Port {want} je obsazený (běží už SynthTrack?), používám {port}.", file=sys.stderr)
+    print(f"SynthTrack: http://127.0.0.1:{port}/")
     app = create_app(settings)
     server = uvicorn.Server(uvicorn.Config(app, host="127.0.0.1", port=port, log_level="warning",
                                            log_config=None))

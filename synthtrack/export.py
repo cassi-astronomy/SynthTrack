@@ -2,8 +2,10 @@
 
 Positions are measured by PSF fits in sub-stacks along the track (one
 position per sub-stack at its mean time) and converted with the WCS of the
-reference frame. Before submitting to the MPC the planned Gaia DR3 refit of
-that WCS should be used; the exported file says so in its header.
+reference frame. When UCAC4 is available the job refits the WCS distortion on
+~20 000 UCAC4 stars (``twilight.refine_wcs``); the header says which reference
+the astrometry rests on (NET line) and how well the stars fit. MPC 80-column
+files must be plain ASCII.
 """
 from __future__ import annotations
 
@@ -73,16 +75,66 @@ def positions_along_track(c: dict, mjd_ref: float, mjd_list: list[float], n_poin
     return out
 
 
+
+def n_observations(c: dict, mjd_list: list[float], summary: dict | None = None) -> int:
+    """3 observations per object; 2 for a slow one (moves < 1.5 FWHM over the whole series): its
+    three sub-stack positions lie within the measuring error of each other, the middle one adds
+    nothing to the motion and the end points are the best lever."""
+    s = summary or {}
+    fwhm_as = float(s.get("fwhm_px") or 0) * float(s.get("pixel_scale") or 0)
+    rate = c.get("rate_arcsec_min")
+    if not mjd_list or rate is None or fwhm_as <= 0:
+        return 3
+    span_min = (max(mjd_list) - min(mjd_list)) * 1440.0
+    return 2 if rate * span_min < 1.5 * fwhm_as else 3
+
+
+def observations_for(c: dict, mjd_ref: float, mjd_list: list[float], summary: dict | None = None) -> list[tuple]:
+    """(mjd, ra, dec) to report: the measured sub-stack positions (PSF fits along the track),
+    reduced to 3 – or 2 for a slow object (first and last); the linear track only as fallback."""
+    k = n_observations(c, mjd_list, summary)
+    measured = sorted((p["mjd"], p["ra"], p["dec"]) for p in c.get("positions", [])
+                      if p.get("ok") and p.get("ra") is not None and p.get("mjd") is not None)
+    if len(measured) >= 2:
+        if len(measured) <= k:
+            return measured
+        if k == 2:
+            return [measured[0], measured[-1]]
+        idx = [round(i * (len(measured) - 1) / (k - 1)) for i in range(k)]
+        return [measured[i] for i in idx]
+    return positions_along_track(c, mjd_ref, mjd_list, n_points=k)
+
+def astrometry_note(summary: dict | None) -> tuple[str | None, str]:
+    """(NET catalogue name or None, short ASCII note) from the job summary."""
+    s = summary or {}
+    src = str(s.get("wcs_source") or "")
+    ref = s.get("wcs_refined") or {}
+    scale = float(s.get("pixel_scale") or 0.0)
+    if "UCAC4" in src and ref.get("refined_px"):
+        worst = max(ref["refined_px"].values())
+        med = ref.get("refined_median_px")
+        txt = (f"WCS refit on {ref.get('pairs', '?')} UCAC4 stars (TAN-SIP5), star residuals median "
+               f"{med} px" + (f" = {med * scale:.2f} arcsec" if med is not None and scale else "")
+               + f", worst zone {worst} px")
+        return "UCAC-4", txt
+    if src.startswith("pointing"):
+        return None, "WCS from mount pointing only - NOT suitable for MPC"
+    return None, f"WCS from {src or 'unknown source'} without catalogue refit - check before submitting"
+
+
 def export_mpc80(cands: list[dict], mjd_ref: float, mjd_list: list[float], obs_code: str,
-                 band: str = "G") -> str:
+                 band: str = "G", summary: dict | None = None) -> str:
     buf = io.StringIO()
-    buf.write("COM SynthTrack 0.1 – POZOR: astrometrie zatím bez Gaia refitu, neodesílat bez kontroly\n")
+    net, note = astrometry_note(summary)
+    buf.write(f"COM SynthTrack 0.1 - {note}\n")
+    buf.write("COM Check every observation before submitting to the MPC\n")
+    if net:
+        buf.write(f"NET {net}\n")
     for c in cands:
         if c.get("status") != "accepted":
             continue
         desig = c.get("trksub") or (f"ST{c['id']:05d}")
-        measured = [(p["mjd"], p["ra"], p["dec"]) for p in c.get("positions", []) if p.get("ok") and "ra" in p]
-        for mjd, ra, dec in (measured or positions_along_track(c, mjd_ref, mjd_list)):
+        for mjd, ra, dec in observations_for(c, mjd_ref, mjd_list, summary):
             buf.write(mpc80_line(desig, mjd, ra, dec, c.get("mag"), band, obs_code,
                                  discovery=c.get("known") is None) + "\n")
     return buf.getvalue()

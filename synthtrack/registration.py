@@ -52,6 +52,25 @@ def detect_stars(img: np.ndarray, nsigma: float = 8.0, max_n: int = 4000, sat_si
     ys, xs = ys[ok], xs[ok]
     if len(ys) == 0:
         return np.zeros((0, 3))
+    # hot pixels / cosmics: one bright pixel with (almost) nothing around it. They do not move
+    # with the dithering, so a frame matched on them is "registered" with zero shift while the
+    # stars are off by the dither/drift (SMPH set, MI C2-9000 2×2, 15. 11.: half of the 8σ
+    # detections were single hot pixels 78–178σ with neighbours ≈ 0; frames 12–52 locked onto
+    # them, stars displaced up to 5 px → "throughput" 0–50 %). A star of FWHM ≥ 1.3 px keeps
+    # ≥ 0.3 of its peak in the four neighbouring pixels.
+    raw = np.nan_to_num(img)
+    win = raw[ys[:, None, None] + np.arange(-1, 2)[None, :, None], xs[:, None, None] + np.arange(-1, 2)[None, None, :]]
+    flat = win.reshape(len(ys), 9)
+    kmax = flat.argmax(axis=1)
+    py, px = ys + kmax // 3 - 1, xs + kmax % 3 - 1
+    inb = (py >= 1) & (px >= 1) & (py < img.shape[0] - 1) & (px < img.shape[1] - 1)
+    py, px = np.clip(py, 1, img.shape[0] - 2), np.clip(px, 1, img.shape[1] - 2)
+    peak = raw[py, px]
+    nb = (raw[py - 1, px] + raw[py + 1, px] + raw[py, px - 1] + raw[py, px + 1]) / 4.0
+    sharp = inb & (peak > 0) & (nb < 0.15 * peak)
+    ys, xs = ys[~sharp], xs[~sharp]
+    if len(ys) == 0:
+        return np.zeros((0, 3))
     # vectorised 5×5 centroids around all peaks at once
     oy, ox = np.mgrid[-r:r + 1, -r:r + 1]
     cut = np.nan_to_num(img[ys[:, None, None] + oy[None], xs[:, None, None] + ox[None]])

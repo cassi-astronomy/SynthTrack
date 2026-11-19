@@ -60,7 +60,9 @@ def test_end_to_end_detects_movers(settings, tmp_path):
         assert hit, f"mover at {x:.1f},{y:.1f} not found"
         assert abs(hit[0]["vx"] - m.vx) < 0.3 and abs(hit[0]["vy"] - m.vy) < 0.3
     # the real movers must be the strongest candidates; few false ones on a dense synthetic field
-    passed = sorted([c for c in cands if c["auto_status"] == "candidate"], key=lambda c: -c["snr"])
+    # (injections – on by default – are hidden in the GUI and not part of this check)
+    passed = sorted([c for c in cands if c["auto_status"] == "candidate" and c.get("injected") is None],
+                    key=lambda c: -c["snr"])
     top = passed[:len(movers)]
     for m in movers:
         x = m.x0 + m.vx * tref + 0.3 * 10
@@ -173,7 +175,7 @@ def test_gpu_cache_is_scoped_to_device_and_memory_limit(monkeypatch):
 
     calls = []
 
-    def fake(device, memory_fraction):
+    def fake(device, memory_fraction, preference="auto"):
         calls.append((device, memory_fraction))
         return Backend("fake", object(), device=device)
 
@@ -241,3 +243,14 @@ def test_watcher_starts_job_for_complete_set(settings, tmp_path):
     assert job.lights_dir.endswith("T1" + __import__("os").sep + "lights") and job.instrument_id == "w"
     assert any("T2" in d for d in w.pending)
     assert w.scan_once() == []            # not processed twice
+
+
+@pytest.mark.parametrize("n", [2, 3])
+def test_two_or_three_frames_run_catalogue_mode_only(settings, tmp_path, n):
+    make_sequence(tmp_path / "seq", n=n, shape=(256, 256), movers=[Mover(60, 80, 1.5, 0.8, 450)],
+                  drift_px_per_frame=(3.0, -2.0), hot_pixels=10)
+    inst = Instrument(id="sim", masters_dir=str(tmp_path / "seq" / "masters"), pixel_size_um=4.85,
+                      focal_length_mm=1000, observatory_code="B12", observer_lat_deg=49.2,
+                      observer_lon_deg=16.6, observer_alt_m=320, site_from_header=False)
+    job, cands, _ = _run(settings, inst, tmp_path / "seq" / "lights")
+    assert job.summary["search_mode"] == "twilight"

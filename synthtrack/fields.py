@@ -28,7 +28,8 @@ from .astrometry import header_wcs
 from .fitsmeta import list_fits, load_image, read_meta
 from .instruments import Instrument
 
-MIN_FRAMES_PER_FIELD = 5          # the pipeline needs at least this many frames
+MIN_FRAMES_PER_FIELD = 2          # 2–4 frames: only the catalogue comparison ("zdroj navíc")
+MIN_FRAMES_TRACKING = 5           # synthetic tracking needs at least this many
 
 
 @dataclass

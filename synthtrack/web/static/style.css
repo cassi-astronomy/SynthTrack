@@ -64,6 +64,9 @@ textarea { font-family: var(--mono); font-size: 12px; width: 100%; }
 .card.focus { outline: 1px solid var(--accent); }
 .card.st-accepted { border-left-color: var(--ok); } .card.st-rejected { border-left-color: var(--bad); opacity: .8; }
 .card.st-unsure { border-left-color: var(--warn); }
+.card.st-auto { border-left-color: #5a6070; opacity: .85; }
+.card.st-border { border-left-color: var(--warn); border-left-style: dashed; }
+.badge.auto { background: #3a3f4b; color: #c9ced8; } .badge.auto.border { background: #5a4a1f; color: #f0d890; }
 .card-head { display: flex; justify-content: space-between; align-items: center; margin-bottom: 8px; gap: 10px; }
 .card-head .id { font-weight: 700; font-size: 16px; }
 .badge { border: 1px solid #2c5e45; color: var(--ok); border-radius: 999px; padding: 1px 10px; font-size: 12px; }
@@ -95,7 +98,7 @@ pre.log { background: #0b0d10; border: 1px solid var(--line); border-radius: 6px
 .sel .w { color: var(--warn); }
 .grid2 { display: grid; grid-template-columns: repeat(auto-fit, minmax(330px, 1fr)); gap: 14px; }
 .empty { color: var(--muted); padding: 30px 0; text-align: center; }
-.modal { position: fixed; inset: 0; background: rgba(0,0,0,.6); display: flex; align-items: center; justify-content: center; z-index: 10; }
+.modal { position: fixed; inset: 0; background: rgba(0,0,0,.6); display: flex; align-items: center; justify-content: center; z-index: 40; }  /* above the sticky toolbar (20) */
 .modal.hidden, .toast.hidden, .hidden { display: none; }
 .modal-box { width: min(720px, 94vw); max-height: 82vh; display: flex; flex-direction: column; background: var(--panel); border: 1px solid var(--line); border-radius: 8px; }
 .modal-head, .modal-foot { display: flex; justify-content: space-between; align-items: center; padding: 10px 14px; }
@@ -103,7 +106,7 @@ pre.log { background: #0b0d10; border: 1px solid var(--line); border-radius: 6px
 .br-list { overflow-y: auto; border-top: 1px solid var(--line); border-bottom: 1px solid var(--line); min-height: 260px; }
 .br-item { padding: 6px 14px; cursor: pointer; font-family: var(--mono); font-size: 13px; }
 .br-item:hover { background: var(--panel2); }
-.toast { position: fixed; bottom: 18px; right: 18px; background: var(--panel2); border: 1px solid var(--line); padding: 10px 16px; border-radius: 6px; max-width: 480px; z-index: 20; }
+.toast { position: fixed; bottom: 18px; right: 18px; background: var(--panel2); border: 1px solid var(--line); padding: 10px 16px; border-radius: 6px; max-width: 480px; z-index: 60; }
 .toast.err { border-color: var(--bad); }
 .switch { display: inline-flex; align-items: center; gap: 8px; cursor: pointer; }
 .warnbox { border: 1px solid #6b5a2b; color: var(--warn); border-radius: 6px; padding: 8px 12px; margin: 6px 0; font-size: 13px; }
@@ -137,4 +140,52 @@ pre.log { background: #0b0d10; border: 1px solid var(--line); border-radius: 6px
 .sky-img img { width: 360px; height: 360px; display: block; }
 .sky-img canvas { image-rendering: pixelated; }
 .sky-img .skymark { position: absolute; inset: 0; width: 360px; height: 360px; pointer-events: none; }
+.sky-img .skyvsx { position: absolute; inset: 0; width: 360px; height: 360px; pointer-events: none; }
+.sky-img .skyvsx a { pointer-events: auto; cursor: pointer; }
+.sky-img .skyvsx text { fill: #ff5ad2; font-size: 11px; paint-order: stroke; stroke: rgba(0,0,0,.7); stroke-width: 2px; }
+.sky-vsx-list { padding: 4px 12px 8px; font-size: 12px; line-height: 1.6; }
+.sky-vsx-list a { color: #ff8ae0; }
 .sky-img .empty { padding: 20px; text-align: center; }
+.known-modal { z-index: 50; }
+.known-box { width: min(780px, 96vw); }
+.known-panels { display: flex; flex-wrap: wrap; gap: 12px; justify-content: center; padding: 10px 14px; }
+.known-panels figure { margin: 0; position: relative; text-align: center; }
+.known-panels canvas { width: 230px; height: 230px; max-width: 28vw; max-height: 28vw; image-rendering: pixelated; background: #000; border-radius: 4px; }
+.known-panels .cnt { position: absolute; top: 4px; right: 6px; font-size: 11px; color: #ddd; text-shadow: 0 0 3px #000; }
+.known-panels figcaption { font-size: 12px; color: var(--muted, #999); margin-top: 4px; }
+
+.eph-box { width: min(760px, 96vw); }
+.eph-body { overflow-y: auto; padding: 0 14px 6px; }
+.eph-body .sub { color: var(--muted); font-size: 12px; margin: 8px 0 0; }
+.eph-now td { color: var(--accent, #6cf); font-weight: 600; }
+.eph-box { max-height: 90vh; }
+.eph-modal { z-index: 50; }
+.rng { border-top: 1px solid var(--line); margin-top: 10px; padding-top: 8px; }
+.rng-head { display: flex; justify-content: space-between; align-items: center; gap: 8px; margin-bottom: 6px; flex-wrap: wrap; }
+.rng-tbl tbody tr { cursor: pointer; }
+.rng-tbl tbody tr.sel td { background: var(--panel2); }
+.rng-plot { display: flex; gap: 14px; margin-top: 8px; align-items: flex-start; flex-wrap: wrap; }
+.rng-plot canvas { border: 1px solid var(--line); border-radius: 4px; }
+.rng-info { font-size: 12px; line-height: 1.6; min-width: 220px; flex: 1; }
+.rng-info .sub { color: var(--muted); }
+
+/* decision buttons apart from the look-up buttons: no mis-click on "Zamítnout" when aiming at DSS */
+.act-gap { display: inline-block; width: 36px; border-left: 1px solid var(--line); height: 20px; margin-left: 18px; vertical-align: middle; }
+
+.inj-loss { margin-top: 14px; }
+.inj-stats { display: flex; gap: 24px; flex-wrap: wrap; }
+.inj-stats div { display: flex; flex-direction: column; } .inj-stats b { font-size: 20px; font-weight: 500; }
+.inj-warn { background: rgba(239,159,39,.15); color: #EF9F27; border-radius: 6px; padding: 6px 10px; margin-top: 10px; font-size: 13px; }
+.inj-bars { display: grid; grid-template-columns: 220px minmax(0,1fr) 36px; gap: 4px 10px; align-items: center; font-size: 13px; }
+.inj-bars .bar { height: 9px; background: var(--line); border-radius: 3px; } .inj-bars .bar div { height: 9px; background: #EF9F27; border-radius: 3px; }
+.inj-bars .n { text-align: right; }
+
+.thumb.vsxmap { position: relative; }
+.thumb.vsxmap svg { position: absolute; left: 0; top: 0; width: 190px; height: 190px; pointer-events: none; }
+.thumb.vsxmap .vm-clip { width: 190px; height: 190px; overflow: hidden; border-radius: 3px; background: #000; }
+.thumb.vsxmap svg a { pointer-events: auto; }
+.thumb.vsxmap img { width: 190px; height: 190px; object-fit: cover; }
+.thumb.vsxmap .cap a { color: #ff5ad2; }
+#cards .thumb.vsxmap img { image-rendering: auto; transform-origin: 50% 50%; }
+.sky-img .skyvsx a:hover path { stroke-width: 3; stroke: #ffb3ec; }
+.thumb.vsxmap .cap .vtype { color: #e7a6d6; font-size: 11px; }

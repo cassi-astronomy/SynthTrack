@@ -15,6 +15,7 @@ Every decision is returned with a human readable reason and warnings.
 from __future__ import annotations
 
 import json
+import re
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
 
@@ -146,10 +147,24 @@ class MasterLibrary:
         if not temp_ok:
             warnings.append(f"Žádný dark v toleranci teploty ±{inst.dark_temp_tolerance_c} °C – použita nejbližší teplota.")
             temp_ok = g
+        unknown = [e for e in temp_ok if e.meta.exptime is None]
         if light.exptime is None:
-            return Selection("dark", None, "Snímek nemá v hlavičce délku expozice.")
+            best = min(temp_ok, key=lambda e: (_temp_dist(e.meta, light), _date_dist(e.meta, light)))
+            warnings.append("Snímky nemají v hlavičce délku expozice – použit dark bez kontroly expozice. "
+                            "Případně vyberte dark ručně (Kalibrace…).")
+            return Selection("dark", best.meta.path, f"Dark {_fmt(best.meta.exptime)} s bez kontroly expozice, "
+                             f"teplota {_fmt(best.meta.temperature)} °C.", warnings)
         exact = [e for e in temp_ok if e.meta.exptime is not None
                  and abs(e.meta.exptime - light.exptime) <= inst.dark_exptime_tolerance_s]
+        named = [e for e in unknown if (t := exptime_from_name(e.meta.path)) is not None
+                 and abs(t - light.exptime) <= inst.dark_exptime_tolerance_s]
+        if not exact and named:
+            best = min(named, key=lambda e: (_temp_dist(e.meta, light), _date_dist(e.meta, light)))
+            warnings.append(f"Master dark {Path(best.meta.path).name} nemá v hlavičce EXPTIME – "
+                            f"expozice {light.exptime:g} s převzata z názvu souboru.")
+            return Selection("dark", best.meta.path,
+                             f"Expozice {light.exptime:g} s podle názvu souboru, teplota {_fmt(best.meta.temperature)} °C "
+                             f"(snímek {_fmt(light.temperature)} °C), binning {light.xbin}x{light.ybin}.", warnings)
         if exact:
             best = min(exact, key=lambda e: (_temp_dist(e.meta, light), _date_dist(e.meta, light)))
             return Selection("dark", best.meta.path,
@@ -157,15 +172,36 @@ class MasterLibrary:
                              f"teplota {_fmt(best.meta.temperature)} °C (snímek {_fmt(light.temperature)} °C), "
                              f"binning {light.xbin}x{light.ybin}.", warnings)
         # --- scaling fallback ------------------------------------------
+        # darks whose exposure is unknown (no EXPTIME, nothing in the name): better than nothing
+        unnamed = [e for e in unknown if exptime_from_name(e.meta.path) is None]
+
+        def use_unknown(why: str) -> Selection:
+            best = min(unnamed, key=lambda e: (_temp_dist(e.meta, light), _date_dist(e.meta, light)))
+            warnings.append(f"Master dark {Path(best.meta.path).name} nemá v hlavičce délku expozice – "
+                            f"předpokládá se, že odpovídá snímkům ({light.exptime:g} s). {why}"
+                            "Jiný dark lze vybrat ručně (Kalibrace…).")
+            return Selection("dark", best.meta.path,
+                             f"Dark bez EXPTIME v hlavičce (předpoklad {light.exptime:g} s), "
+                             f"teplota {_fmt(best.meta.temperature)} °C (snímek {_fmt(light.temperature)} °C).", warnings)
+
+        avail = sorted({e.meta.exptime for e in temp_ok if e.meta.exptime})
+        avail_txt = ", ".join(f"{a:g}" for a in avail) or "–"
+        if len(unknown):
+            avail_txt += f"; {len(unknown)}× bez EXPTIME"
         if not inst.allow_dark_scaling:
-            avail = sorted({e.meta.exptime for e in temp_ok if e.meta.exptime})
+            if unnamed:
+                return use_unknown("")
             return Selection("dark", None,
-                             f"Chybí dark {light.exptime:g} s (k dispozici: {', '.join(f'{a:g}' for a in avail) or '–'} s). "
+                             f"Chybí dark {light.exptime:g} s (k dispozici: {avail_txt} s). "
                              "Škálování darku je u přístroje vypnuté.", warnings)
         bias = self.select_bias(light)
-        if not bias.ok:
-            return Selection("dark", None, f"Chybí dark {light.exptime:g} s a pro škálování chybí master bias.", warnings)
         with_t = [e for e in temp_ok if e.meta.exptime]
+        if not bias.ok or not with_t:
+            if unnamed:
+                return use_unknown("")
+            return Selection("dark", None, f"Chybí dark {light.exptime:g} s (k dispozici: {avail_txt} s) "
+                             "a pro škálování chybí master bias." if not bias.ok else
+                             f"Chybí dark {light.exptime:g} s (k dispozici: {avail_txt} s).", warnings)
         longer = [e for e in with_t if e.meta.exptime >= light.exptime]
         pool = longer or with_t
         best = min(pool, key=lambda e: (abs(e.meta.exptime - light.exptime), _temp_dist(e.meta, light)))
@@ -191,6 +227,48 @@ class MasterLibrary:
         return Selection("flat", best.meta.path,
                          f"Filtr {light.filter}, binning {light.xbin}x{light.ybin}, "
                          f"rozdíl data {'?' if days == float('inf') else f'{days:.1f} d'}.", warnings)
+
+
+_EXP_RE = re.compile(r"(?<![\d.])(\d+(?:[.,]\d+)?)\s*(?:s|sec|secs|seconds|sek)(?![a-z])", re.I)
+
+
+def exptime_from_name(path: str) -> float | None:
+    """Exposure from a file name like ``MasterDark_60s.fits`` / ``dark-30sec-bin1``; None if absent or ambiguous."""
+    vals = {float(m.group(1).replace(",", ".")) for m in _EXP_RE.finditer(Path(path).stem)}
+    return vals.pop() if len(vals) == 1 else None
+
+
+def manual_selection(kind: str, path: str, light: FrameMeta, inst: Instrument) -> Selection:
+    """A master chosen by the user. Geometry must match (it would not subtract); the rest only warns."""
+    p = Path(path)
+    if not p.is_file():
+        return Selection(kind, None, f"Ručně zvolený master {kind} neexistuje: {path}")
+    try:
+        m = read_meta(p, inst, fits.getheader(p))
+    except Exception as e:  # noqa: BLE001
+        return Selection(kind, None, f"Ručně zvolený master {kind} nejde přečíst ({p.name}): {e}")
+    if not _same_geometry(m, light):
+        return Selection(kind, None, f"Ručně zvolený master {kind} {p.name} má rozměr {m.width}×{m.height} bin "
+                         f"{m.xbin}x{m.ybin}, snímky {light.width}×{light.height} bin {light.xbin}x{light.ybin}.")
+    warnings: list[str] = []
+    t = classify(m)
+    if t not in (kind, "unknown") and not (kind == "dark" and t == "bias"):
+        warnings.append(f"Soubor {p.name} vypadá jako {t}, ne {kind}.")
+    if kind == "dark":
+        texp = m.exptime if m.exptime is not None else exptime_from_name(str(p))
+        if texp is None:
+            warnings.append(f"Dark {p.name} nemá délku expozice – kontrola expozice vynechána (ručně zvoleno).")
+        elif light.exptime is not None and abs(texp - light.exptime) > inst.dark_exptime_tolerance_s:
+            warnings.append(f"Dark {p.name} má expozici {texp:g} s, snímky {light.exptime:g} s – "
+                            "použit bez škálování (ručně zvoleno), tepelný signál nemusí sedět.")
+        if not _temp_ok(m, light, inst.dark_temp_tolerance_c):
+            warnings.append(f"Teplota darku {_fmt(m.temperature)} °C vs snímky {_fmt(light.temperature)} °C.")
+        if not _same_gain(m, light):
+            warnings.append(f"Gain/offset darku {m.gain}/{m.offset} vs snímky {light.gain}/{light.offset}.")
+    else:
+        if m.filter and light.filter and m.filter != light.filter:
+            warnings.append(f"Flat {p.name} je pro filtr '{m.filter}', snímky '{light.filter}'.")
+    return Selection(kind, str(p), f"Ručně zvoleno: {p.name}.", warnings)
 
 
 def _same_bin(a: FrameMeta, b: FrameMeta) -> bool:

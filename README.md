@@ -19,10 +19,20 @@ python -m venv .venv
 # Windows:  .venv\Scripts\activate        Linux:  source .venv/bin/activate
 pip install -e .
 pip install -e ".[cuda12]"     # NVIDIA GPU (CUDA 12) – volitelné, jinak běží na CPU
+pip install -e ".[rocm]"       # AMD GPU (ROCm 7, jen Linux/WSL2) – místo cuda12, nikdy obojí
 pip install -e ".[cosmics]"    # volitelně odstranění kosmiky (astroscrappy)
 ```
 
-Kontrola GPU: `synthtrack gpu` (má ukázat `"backend": "cupy"` a vaši kartu).
+Kontrola GPU: `synthtrack gpu` (má ukázat `"backend": "cupy"`, `"platform": "cuda"` nebo `"rocm"` a vaši kartu).
+AMD na Linuxu: nejdřív ROCm (`sudo apt install rocm`, `sudo usermod -a -G render,video $USER`, restart),
+ověření `rocminfo | grep gfx`. Bez CuPy program sám pozná NVIDIA/AMD kartu a napíše, co doinstalovat.
+
+**Linux (vzdálený počítač, AMD i NVIDIA):** zkopírujte `dist/synthtrack-kod.tar.gz`
+a `dist/synthtrack-data*.tar` (vytvoří `synthtrack export-data <složka>` + tar), pak
+`tar xzf synthtrack-kod.tar.gz && cd SynthTrack && ./install_linux.sh --data ../synthtrack-data.tar`.
+Skript vytvoří `.venv`, nainstaluje CuPy pro ROCm/CUDA podle karty, převezme přístroje,
+mastery (`~/SynthTrackData/masters/<přístroj>`), katalogy a klasifikátor a cesty z Windows
+opraví (`synthtrack import-data`). ASTAP pro Linux: `astap_amd64.deb` + databáze z hnsky.org.
 
 **ASTAP** (astrometrie, offline): nainstalujte ASTAP + databázi hvězd
 (D50 pro běžná pole, D80 pro pole pod ~0,5°, W08 pro širokoúhlé objektivy)
@@ -83,7 +93,7 @@ synthtrack run --instrument demo --lights ~/SynthTrackData/demo/lights
 | Odečet hvězd | Šablona pro každý snímek = medián jen ze snímků vzdálených v čase (pomalé planetky se tak samy neodečtou), maska jasných hvězd. |
 | Matched filter | Gaussovský filtr s naměřeným FWHM, přenormování na jednotkovou σ. |
 | Synthetic tracking | Mřížka rychlostí z rozsahu v ″/min, krok tak, aby chyba stopy < 0,7 px; pro každý pixel nejlepší SNR. Na GPU (CuPy) i CPU stejný kód. |
-| Pomalé objekty | Zadané minimum rychlosti se vždy dodrží. Pokud je stopa proti FWHM velmi krátká, program upozorní na nižší účinnost, ale planetku z hledání svévolně nevyřadí. |
+| Pomalé objekty | Nejnižší hledaná rychlost je větší ze zadaného minima a rychlosti, při které se objekt za sekvenci posune aspoň o ~1 FWHM (`min_efficiency`). Pomalejší objekty se najdou na této rychlosti; pod ní by hledání zachytávalo hlavně rezidua hvězd. |
 | Kandidáti | Lokální maxima nad prahem, jemné doladění rychlosti, sloučení duplicit. |
 | Prověření | SNR ve 3 časových segmentech, poměr medián/průměr (jednosnímkové artefakty), reziduum hvězdy, pokrytí. |
 | Identifikace | Lokální MPCORB + CometEls; rychlý dvoutělesový výběr kolem pole, pak **N-body integrace** z epochy elementů (Slunce, planety, Měsíc, Pluto, relativita), iterovaná doba letu světla, topocentrický pozorovatel; astrometrická poloha ICRF jako u MPC. Párování podle polohy a rychlosti, O−C. |
@@ -158,6 +168,21 @@ nastavený počet snímků a po dobu ustálení se nemění, spustí úlohu. Př
 se vybere pevně, nebo podle pravidel v hlavičce. Zpracované adresáře si
 pamatuje (`watch_state.json`).
 
+**Rozpoznání přístroje** (Přístroje → *Pravidla pro automatický režim*): každé
+pravidlo `KLÍČ = hodnota` musí sedět (text = podřetězec bez ohledu na velikost
+písmen, číslo ± max(1, 2 %)). Kontroluje se první, prostřední a poslední snímek
+sady. Sedí-li víc profilů, vyhraje ten s více pravidly; při shodě se nic nespustí
+(žádné hádání). Nerozpoznaná sada se nepřeskočí – čeká, a jakmile pravidla
+doplníte, spustí se sama. Ověřená pravidla FRAM:
+
+| Profil | Pravidla |
+|---|---|
+| CTA-S1 (WF0) | `TELESCOP = CTA-S1`, `CCD_NAME = WF0` |
+| CTA-N (WF0) | `TELESCOP = CTA-N`, `CCD_NAME = WF0` (zatím neověřeno na snímku) |
+| Coihueco (FRAM2 WF1) | `TELESCOP = FRAM2`, `CCD_NAME = WF1` |
+
+Totéž rozpoznání předvyplní přístroj i u ruční *Nové úlohy*.
+
 ## Katalogy
 
 „Katalogy a nastavení“ → *Aktualizovat z MPC* (nejdřív povolit stahování
@@ -185,8 +210,8 @@ Proč běžný synthetic tracking pomalé objekty ztrácí a co dělá SynthTrac
 * **Šum měřený v čase** pro každý pixel + model šumu u hvězd (pozadí,
   Poisson hvězdy, residua úměrná jasu) – hvězdy nevyrábějí falešné detekce.
 * **Omezení příspěvku jednoho snímku** (±4σ) – kosmika a horké pixely bez
-  destruktivního maskování. Volitelné maskování kosmiky a družic je ve výchozím
-  nastavení vypnuté, protože u podvzorkovaných hvězd může snižovat úplnost.
+  destruktivního maskování; navíc maskování kosmiky (8 sousedů, pojistka plochy)
+  a stop družic (zapnuto, `mask_transients`).
 * **Fotometrické srovnání snímků** a odečet pomalých trendů pozadí (soumrak).
 * **Prověření:** konzistence segmentů vůči *očekávanému* profilu pomalého
   objektu, χ² po snímcích, test opačného směru (−v), přesycené hvězdy.
@@ -281,7 +306,7 @@ synthtrack/
   registration.py  detekce hvězd, párování, polynomiální distorze, převzorkování
   search.py        šablona, šum, matched filter, TrackNorm, hledání v dlaždici, prověření, astrometrie podstacků
   tracking.py      společné typy (Candidate, mřížka rychlostí), FWHM, deduplikace, záložní fázová korelace
-  gpu.py           výběr backendu (CuPy/NumPy), stav GPU
+  gpu.py           výběr backendu (CuPy CUDA/ROCm, NumPy), stav GPU (nvidia-smi, amd-smi, rocm-smi)
   astrometry.py    ASTAP, WCS registrace
   mpcdata.py       MPCORB/CometEls – stažení, parsování, cache
   identify.py      předpověď pole, párování

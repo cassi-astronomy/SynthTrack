@@ -123,3 +123,129 @@ class LineProfiler:
             else:
                 out.rows, out.row_blocks = lines, blocks
         return out
+
+
+def chip_fixed(cube: np.ndarray, med: np.ndarray, cand: np.ndarray, offsets: np.ndarray,
+               level_frac: float = 0.5, min_level: float = 3.0, min_excess: float = 0.2) -> np.ndarray:
+    """Which bright pixels of a temporal median in chip coordinates are fixed on the chip.
+
+    The temporal median in chip coordinates was assumed to contain only hot
+    pixels once the frames are dithered. That holds for a wide random
+    dithering, not for a small or clustered one (161P, Coihueco: 18 frames in
+    three groups 2–4 px apart): a star sits on the same chip pixel in more
+    than half of the frames, its median peak is 7–10 σ and it was masked as a
+    "hot pixel" in every frame – the hole then zeroed a comet crossing it.
+
+    Two hypotheses are compared for every candidate pixel p (``cand`` = (m, 2)
+    rows, cols in ``cube``):
+      * fixed on the chip – bright at p in every frame,
+      * fixed on the sky – bright at p + d_i − d_j in frame i, i.e. a star that
+        lies on p in frame j (``offsets`` (n, m, 2): chip position of the
+        candidate's sky point in frame i minus p, from the registration).
+    F = fraction of frames brighter than ``level_frac`` × median value
+    (3×3 maximum, sub-pixel registration errors); the best j is taken for the
+    sky hypothesis. A pixel is chip-fixed when F_chip − F_sky ≥ ``min_excess``.
+    Ties (no dithering between the frames that matter) keep the data."""
+    n, h, w = cube.shape
+    m = len(cand)
+    if m == 0:
+        return np.zeros(0, bool)
+    ys, xs = cand[:, 0], cand[:, 1]
+    lev = np.maximum(min_level, level_frac * med[ys, xs])
+    d = np.rint(offsets).astype(int)                       # (n, m, 2)
+    f_chip = np.zeros(m, np.float32)
+    hits = np.zeros((n, m), np.float32)                    # sky hypothesis j, summed over frames i
+    for i in range(n):
+        fr = np.nan_to_num(cube[i], nan=-1e30, posinf=-1e30, neginf=-1e30)
+        mx = ndimage.maximum_filter(fr, size=3, mode="nearest")
+        f_chip += mx[ys, xs] > lev
+        for j in range(n):
+            py = np.clip(ys + d[i, :, 0] - d[j, :, 0], 0, h - 1)
+            px = np.clip(xs + d[i, :, 1] - d[j, :, 1], 0, w - 1)
+            hits[j] += mx[py, px] > lev
+    f_sky = hits.max(axis=0) / n
+    return (f_chip / n - f_sky) >= min_excess
+
+
+def chip_fixed_weak(cube: np.ndarray, med: np.ndarray, cand: np.ndarray, offsets: np.ndarray,
+                    level_frac: float = 0.5, min_frac: float = 0.5) -> np.ndarray:
+    """Weak warm pixels (temporal chip median ~1.5–6 σ) that ``chip_fixed`` cannot see.
+
+    ``chip_fixed`` works with a fixed 3 σ level and a 3×3 maximum; for a 2–4 σ pixel
+    the sky hypothesis is then satisfied by *any* star within the dither range
+    (11P/Coihueco 8. 11. 2026: 28 frames, a 11 px drift-like dither, 7 400 of
+    11 600 passing detections moved exactly with the drift and sat on single
+    pixels 2–6 σ in the chip median – below the 6 σ hot-pixel cut).
+
+    Here every frame is tested on its own: frame i counts as *unexplained* when
+    the chip pixel p is above ``level_frac`` × median there but the static sky
+    under p in that frame – the median over the other frames k of the chip pixel
+    p − d_i + d_k, i.e. the same sky point – is below that level. A star explains
+    its own brightness (the sky point under p is bright), a warm pixel does not.
+    Fixed on the chip when ≥ ``min_frac`` of the frames are unexplained.
+    ``cand`` (m, 2) rows, cols; ``offsets`` (n, m, 2) as in ``chip_fixed``."""
+    n, h, w = cube.shape
+    m = len(cand)
+    if m == 0:
+        return np.zeros(0, bool)
+    ys, xs = cand[:, 0], cand[:, 1]
+    lev = (level_frac * med[ys, xs]).astype(np.float32)
+    d = np.rint(offsets).astype(int)                       # (n, m, 2)
+    unexplained = np.zeros(m, np.float32)
+    vals = np.empty((n, m), np.float32)
+    for i in range(n):
+        for k in range(n):
+            if k == i:
+                vals[k] = np.nan                           # the tested value itself stays out
+                continue
+            py = np.clip(ys - d[i, :, 0] + d[k, :, 0], 0, h - 1)
+            px = np.clip(xs - d[i, :, 1] + d[k, :, 1], 0, w - 1)
+            vals[k] = cube[k, py, px]
+        sky = _nanmedian_rows(vals)
+        ci = cube[i, ys, xs]
+        with np.errstate(invalid="ignore"):
+            unexplained += (ci > lev) & ~(sky >= lev)       # NaN sky (no data) does not explain it
+    return unexplained / n >= min_frac
+
+
+def _nanmedian_rows(v: np.ndarray) -> np.ndarray:
+    """Median over axis 0 ignoring NaN (vectorised; NaN where no value)."""
+    t = np.ascontiguousarray(v.T)                     # sort along the last, contiguous axis
+    fin = np.isfinite(t)
+    cnt = fin.sum(axis=1)
+    srt = np.sort(np.where(fin, t, np.inf), axis=1)   # no NaN in the sort (see search._nanmedian0)
+    lo = np.maximum((cnt - 1) // 2, 0)[:, None]
+    hi = np.maximum(cnt // 2, 0)[:, None]
+    with np.errstate(invalid="ignore"):
+        m = 0.5 * (np.take_along_axis(srt, lo, 1) + np.take_along_axis(srt, hi, 1))[:, 0]
+    return np.where(cnt > 0, m, np.nan)
+
+
+def inpaint_pixels(frame: np.ndarray, ys: np.ndarray, xs: np.ndarray) -> None:
+    """Replace the listed pixels by the median of their unmasked 8 neighbours (in place).
+
+    Used for isolated hot / warm pixels instead of NaN: ``warp`` turns one missing input
+    pixel into ~4 missing output pixels, and with 1–2 % of the chip masked every star and
+    asteroid lost its core in ~30 % of the frames (88P/Coihueco 8. 11.: (149) Medusa, (419)
+    Aurelia, (494) Virtus 12–14 mag locked onto a wrong, slow velocity – "nekonzistentní
+    segmenty"). A neighbour median keeps the frame usable; the pixel's own (hot) value is
+    never used."""
+    h, w = frame.shape
+    if len(ys) == 0:
+        return
+    bad = np.zeros((h, w), bool)
+    bad[ys, xs] = True
+    vals = np.full((8, len(ys)), np.nan, np.float32)
+    k = 0
+    for dy in (-1, 0, 1):
+        for dx in (-1, 0, 1):
+            if dy == 0 and dx == 0:
+                continue
+            yy, xx = ys + dy, xs + dx
+            ok = (yy >= 0) & (yy < h) & (xx >= 0) & (xx < w)
+            yy, xx = np.clip(yy, 0, h - 1), np.clip(xx, 0, w - 1)
+            v = frame[yy, xx].astype(np.float32)
+            v[~ok | bad[yy, xx]] = np.nan
+            vals[k] = v
+            k += 1
+    frame[ys, xs] = _nanmedian_rows(vals)

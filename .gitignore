@@ -28,6 +28,9 @@ jobs/
 catalogs/
 models/
 _preview/
+_diag/
+_to_delete/
 *.log
+*.tmp
 *.tgz
 pre_*_backup_*/
