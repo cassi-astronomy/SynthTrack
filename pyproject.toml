@@ -1,0 +1,47 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "synthtrack"
+version = "0.1.0"
+description = "GPU synthetic tracking pipeline for asteroid and comet detection"
+readme = "README.md"
+requires-python = ">=3.10"
+dependencies = [
+    "numpy>=1.26",
+    "scipy>=1.11",
+    "astropy>=6.0",
+    "fastapi>=0.110",
+    "uvicorn>=0.29",
+    "requests>=2.31",
+    "tomli-w>=1.0",
+    "pillow>=10",
+    "jplephem>=2.20",
+    "tomli>=2.0; python_version < '3.11'",
+]
+
+[project.optional-dependencies]
+# NVIDIA GPU (CUDA 12.x). Na Windows i Linuxu: pip install "synthtrack[cuda12]"
+# Hlavičky + NVRTC z pipu (CuPy jimi za běhu překládá kernely). Celé [ctk] (~550 MB,
+# cuBLAS/cuFFT/...) není potřeba – SynthTrack používá jen elementwise operace a redukce.
+cuda12 = ["cupy-cuda12x>=13.4", "nvidia-cuda-runtime-cu12", "nvidia-cuda-nvrtc-cu12"]
+cuda11 = ["cupy-cuda11x>=13"]
+cosmics = ["astroscrappy>=1.1"]
+desktop = ["pywebview>=5"]          # samostatné okno aplikace (synthtrack app)
+dev = ["pytest>=8", "httpx>=0.27"]
+
+[project.scripts]
+synthtrack = "synthtrack.cli:main"
+
+[project.gui-scripts]
+synthtrack-app = "synthtrack.desktop:gui_main"      # Windows: no console window
+
+[tool.setuptools.packages.find]
+include = ["synthtrack*"]
+
+[tool.setuptools.package-data]
+synthtrack = ["web/static/*", "data/*/*"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
